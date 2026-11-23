@@ -1,0 +1,887 @@
+"""Stage 5.1.6: duplicate-aware conservative validation of drawing geometry candidates.
+
+Produces conservative, source-linked review candidates only. It does NOT create
+verified BIM objects or 3D geometry.
+"""
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+import hashlib
+import json
+import math
+import re
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+SCHEMA_VERSION = "0.8.0"
+RECOGNITION_VERSION = "0.8.0"
+MAX_LINES_PER_PAGE = 12000
+MAX_RECTS_PER_PAGE = 12000
+MAX_WALL_CANDIDATES_PER_PAGE = 180
+
+_DRAWING_PATTERNS = {
+    # Specific sheet families must be evaluated before generic "plan", "detail",
+    # "section", or "schedule" terms.
+    "window_schedule": (r"\bwindow\s+schedule\b", r"\bwindow\s+type\b"),
+    "door_schedule": (r"\bdoor\s+schedule\b", r"\bdoor\s+type\b"),
+    "finish_schedule": (r"\bfinish(?:es)?\s+schedule\b", r"\bmaterial\s+schedule\b"),
+    "schedule": (r"\bschedule\b", r"\blegend\b", r"\bhatch\s+description\b"),
+    "reflected_ceiling_plan": (r"\breflected\s+ceiling\b", r"\bRCP\b"),
+    "floor_finish_plan": (r"\bfloor\s+finish(?:es)?\s+layout\b", r"\bfloor\s+finish\s+plan\b"),
+    "wall_finish_plan": (r"\bwall\s+finish(?:es)?\s+layout\b",),
+    "wet_area_detail": (r"\bwet\s+area\b", r"\btoilet\s+detail\b", r"\bbathroom\s+detail\b"),
+    "staircase_detail": (r"\bstaircase?\b", r"\bstair\s+detail\b", r"\btread\b", r"\briser\b"),
+    "lift_detail": (r"\blift\b", r"\belevator\b"),
+    "facade_cladding": (r"\bcladding\b", r"\bexternal\s+envelope\b", r"\bfacade\b", r"\bfaçade\b"),
+    "thermal_section": (r"\bthermal\b", r"\bU[- ]?value\b"),
+    "landscape_plan": (r"\blandscape\b", r"\bplanting\b"),
+    "hardscape_plan": (r"\bhardscape\b", r"\bpaving\b"),
+    "signage_plan": (r"\bsignage\b", r"\bwayfinding\b", r"\bsignboard\b"),
+    "parking_detail": (r"\bshaded\s+parking\b", r"\bparking\s+shade\b"),
+    "site_setting_out": (r"\bsite\s+setting[- ]out\b", r"\bsetting\s+out\b"),
+    "site_plan": (r"\bsite\s+plan\b", r"\blocation\s+plan\b"),
+    "area_calculation": (r"\barea\s+calculation\b", r"\barea\s+schedule\b"),
+    "cover_sheet": (r"\bcover\s+page\b", r"\bcover\s+sheet\b", r"\bdrawing\s+index\b"),
+    "perspective": (r"\bperspective\b", r"\b3D\s+view\b", r"\brender(?:ing)?\b"),
+    "elevation": (r"\belevation\b", r"\belev\.?\b"),
+    "section": (r"\bsection\b", r"\bsectional\b", r"\bwall\s+section\b"),
+    "floor_plan": (r"\bfloor\s+plan\b", r"\bGA\s+plan\b", r"\bground\s+floor\b",
+                   r"\bbasement\b", r"\bmezzanine\b", r"\broof\s+plan\b"),
+    "room_detail": (r"\bpartial\s+drawings?\b", r"\bpartial\s+details?\b",
+                    r"\broom\s+detail\b", r"\btypical\s+detail\b"),
+    "general_detail": (r"\bdetail\b", r"\bconstruction\s+detail\b"),
+}
+
+# More specific classes win over broad classes when both appear in a filename/title.
+_DRAWING_PRIORITY = {
+    "window_schedule": 100, "door_schedule": 99, "finish_schedule": 98,
+    "reflected_ceiling_plan": 96, "floor_finish_plan": 95, "wall_finish_plan": 94,
+    "staircase_detail": 93, "wet_area_detail": 92, "lift_detail": 91,
+    "facade_cladding": 90, "thermal_section": 89, "signage_plan": 88,
+    "hardscape_plan": 87, "landscape_plan": 86, "parking_detail": 85,
+    "site_setting_out": 84, "area_calculation": 83, "cover_sheet": 82,
+    "perspective": 81, "site_plan": 80, "elevation": 70, "section": 69,
+    "floor_plan": 60, "room_detail": 50, "general_detail": 40, "schedule": 30,
+}
+
+_ELEMENT_TEXT_PATTERNS = {
+    "wall": r"\b(?:wall|blockwork|partition|reinforced\s+concrete\s+wall)\b",
+    "column": r"\b(?:column|col\.?)\b",
+    "beam": r"\b(?:beam|girder)\b",
+    "door": r"\b(?:door|DTGF|FD-\d)\b",
+    "window": r"\b(?:window|W\d{1,3})\b",
+    "stair": r"\b(?:stair|staircase|riser|tread)\b",
+    "tank": r"\b(?:tank|reservoir|m[³3])\b",
+    "equipment": r"\b(?:pump|transformer|generator|AHU|VAHU|CWP|CHWMP)\b",
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _distance(a, b) -> float:
+    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1]))
+
+
+def _line_from_item(item):
+    if len(item) >= 3 and item[0] == "l":
+        a, b = item[1], item[2]
+        return ((float(a.x), float(a.y)), (float(b.x), float(b.y)))
+    return None
+
+
+def _rect_from_item(item):
+    if len(item) >= 2 and item[0] == "re":
+        r = item[1]
+        return [float(r.x0), float(r.y0), float(r.x1), float(r.y1)]
+    return None
+
+
+def _normalize_rect(r):
+    x0, y0, x1, y1 = r
+    return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+
+
+def _rect_dims(r):
+    r = _normalize_rect(r)
+    return r[2] - r[0], r[3] - r[1]
+
+
+def _page_text_spans(page):
+    spans = []
+    try:
+        blocks = page.get_text("dict").get("blocks", [])
+    except Exception:
+        return spans
+    for block in blocks:
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                txt = (span.get("text") or "").strip()
+                bbox = span.get("bbox")
+                if txt and bbox:
+                    spans.append((txt[:160], tuple(float(v) for v in bbox)))
+    return spans
+
+
+def _classify_drawing(filename: str, text_spans) -> tuple[str, float, list[str]]:
+    """Classify a sheet using filename/title evidence, with specific classes first."""
+    filename_text = (filename or "").replace("_", " ").replace("-", " ").lower()
+    page_text = " ".join(item[0] for item in text_spans).lower()
+    combined = f"{filename_text} {page_text}"
+
+    scores = {}
+    evidence = {}
+    for kind, patterns in _DRAWING_PATTERNS.items():
+        filename_hits = sum(1 for pattern in patterns if re.search(pattern, filename_text, re.I))
+        text_hits = sum(1 for pattern in patterns if re.search(pattern, page_text, re.I))
+        # Filename is a strong clue; page text independently corroborates it.
+        score = filename_hits * 3 + text_hits
+        if score:
+            scores[kind] = score
+            evidence[kind] = {
+                "filename_hits": filename_hits,
+                "page_text_hits": text_hits,
+                "score": score,
+            }
+
+    if not scores:
+        return "unknown", 0.0, []
+
+    ranked = sorted(
+        scores.items(),
+        key=lambda item: (item[1], _DRAWING_PRIORITY.get(item[0], 0)),
+        reverse=True,
+    )
+    best, score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0
+    confidence = 0.48 + min(score, 6) * 0.055
+    if score - second_score <= 1 and len(ranked) > 1:
+        confidence -= 0.08
+    if best in ("floor_plan", "section", "elevation") and not re.search(
+        _DRAWING_PATTERNS[best][0], filename_text, re.I
+    ):
+        confidence -= 0.08
+    confidence = max(0.25, min(0.94, confidence))
+    ordered_evidence = [
+        f"{kind}:{scores[kind]}:{evidence[kind]}" for kind, _ in ranked
+    ]
+    return best, round(confidence, 2), ordered_evidence
+
+
+def _drawing_extraction_policy(drawing_kind: str) -> dict:
+    """Describe which geometric heuristics are permitted for each sheet family."""
+    policies = {
+        "floor_plan": {
+            "geometry_candidates": ["rectangular_footprints", "parallel_wall_edge_pairs"],
+            "interpretation": "plan_geometry_hypotheses",
+        },
+        "site_plan": {
+            "geometry_candidates": ["rectangular_footprints", "parallel_boundary_pairs"],
+            "interpretation": "site_layout_hypotheses",
+        },
+        "reflected_ceiling_plan": {
+            "geometry_candidates": [],
+            "interpretation": "ceiling_symbols_and_text_only",
+        },
+        "floor_finish_plan": {
+            "geometry_candidates": [],
+            "interpretation": "finish_zones_and_text_only",
+        },
+        "wall_finish_plan": {
+            "geometry_candidates": [],
+            "interpretation": "wall_finish_annotations_only",
+        },
+        "door_schedule": {
+            "geometry_candidates": [],
+            "interpretation": "schedule_text_and_type_marks",
+        },
+        "window_schedule": {
+            "geometry_candidates": [],
+            "interpretation": "schedule_text_and_type_marks",
+        },
+        "finish_schedule": {
+            "geometry_candidates": [],
+            "interpretation": "schedule_text_and_material_marks",
+        },
+        "schedule": {
+            "geometry_candidates": [],
+            "interpretation": "schedule_text_only",
+        },
+        "section": {
+            "geometry_candidates": [],
+            "interpretation": "vertical_level_and_height_evidence",
+        },
+        "thermal_section": {
+            "geometry_candidates": [],
+            "interpretation": "assembly_and_thermal_annotation_evidence",
+        },
+        "elevation": {
+            "geometry_candidates": [],
+            "interpretation": "facade_opening_and_level_evidence",
+        },
+        "facade_cladding": {
+            "geometry_candidates": [],
+            "interpretation": "panel_module_and_cladding_annotation_evidence",
+        },
+        "staircase_detail": {
+            "geometry_candidates": [],
+            "interpretation": "stair_dimension_and_component_text_evidence",
+        },
+        "wet_area_detail": {
+            "geometry_candidates": [],
+            "interpretation": "wet_area_fixture_and_finish_text_evidence",
+        },
+        "lift_detail": {
+            "geometry_candidates": [],
+            "interpretation": "lift_shaft_and_equipment_annotation_evidence",
+        },
+    }
+    return policies.get(drawing_kind, {
+        "geometry_candidates": [],
+        "interpretation": "text_evidence_only_until_sheet_family_is_verified",
+    })
+
+
+def _page_text_evidence(text_spans, page_width=None, page_height=None):
+    """Index engineering-relevant text while excluding sheet furniture and prose."""
+    found = []
+    patterns = [
+        ("door_mark", r"^(?:D|DR|DOOR)[-_ ]?[A-Z0-9]{1,6}$"),
+        ("window_mark", r"^(?:W|WIN|WINDOW)[-_ ]?[A-Z0-9]{1,6}$"),
+        ("level_mark", r"\b(?:FFL|SSL|TOS|TOC|RL)\s*[:=]?\s*[-+]?\d+(?:\.\d+)?\b"),
+        ("dimension_or_measure", r"(?<![A-Z])\d+(?:\.\d+)?\s*(?:mm|cm|m)\b|\b\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?\s*(?:mm|cm|m)?\b"),
+        ("stair_terms", r"\b(?:stair(?:case)?\s*\d*|tread|riser|landing)\b"),
+        ("wall_terms", r"\b(?:wall|partition|blockwork|drywall)\b"),
+        ("equipment_terms", r"\b(?:pump|tank|transformer|generator|AHU|fan|panel|chiller|boiler)\b"),
+        ("room_or_space_name", r"\b(?:room|workshop|office|corridor|lobby|store|toilet|plant room)\b"),
+        ("finish_terms", r"\b(?:tile|paint|finish|cladding|aluminium|aluminum|glass)\b"),
+    ]
+    for text, bbox in text_spans:
+        x0, y0, x1, y1 = bbox
+        cx, cy = (x0+x1)/2, (y0+y1)/2
+        # Ignore title block, right-side legends/key plans, and left-side general notes.
+        if page_width and (cx < page_width*0.17 or cx > page_width*0.82):
+            continue
+        if page_height and cy > page_height*0.92:
+            continue
+        compact = re.sub(r"\s+", " ", text).strip()
+        for label, pattern in patterns:
+            if re.search(pattern, compact, re.I):
+                found.append({"kind": label, "text": compact,
+                    "bbox_pdf_points": [round(v, 2) for v in bbox],
+                    "source": "native_pdf_text", "is_bim_element": False})
+                break
+    return found[:300]
+
+
+def _near_text_labels(text_spans, bbox, max_distance=48.0, page_width=None, page_height=None):
+    x0, y0, x1, y1 = bbox
+    center = ((x0 + x1) / 2, (y0 + y1) / 2)
+    found = []
+    for txt, b in text_spans:
+        tx, ty = (b[0]+b[2])/2, (b[1]+b[3])/2
+        if page_width and (tx < page_width*0.17 or tx > page_width*0.82):
+            continue
+        if page_height and ty > page_height*0.92:
+            continue
+        # Exclude long specification/note sentences; keep concise labels and marks.
+        clean = re.sub(r"\s+", " ", txt).strip()
+        if len(clean) > 48 or len(clean.split()) > 6:
+            continue
+        if re.search(r"\b(?:copyright|drawing number|designed|drawn|consultant|shall|must|should|regulations|specification|technical data|do not scale)\b", clean, re.I):
+            continue
+        c = (tx, ty)
+        d = _distance(center, c)
+        if d <= max_distance:
+            found.append((d, clean, [round(v, 2) for v in b]))
+    found.sort(key=lambda x: x[0])
+    return [{"text": t, "distance_pdf_points": round(d, 2), "bbox": b}
+            for d, t, b in found[:6]]
+
+
+def _text_semantic_hints(labels):
+    joined = " ".join(item["text"] for item in labels)
+    return [name for name, pattern in _ELEMENT_TEXT_PATTERNS.items()
+            if re.search(pattern, joined, re.I)]
+
+
+def _semantic_context(labels):
+    """Nearby labels are supporting evidence, never proof of geometry."""
+    joined = " ".join(item.get("text", "") for item in labels)
+    hints = _text_semantic_hints(labels)
+    exclusions = []
+    rules = {
+        "tank_or_reservoir": r"\b(?:tank|reservoir|sump|cistern)\b",
+        "mechanical_equipment": r"\b(?:pump|transformer|generator|AHU|VAHU|CWP|CHWMP|chiller|boiler|fan)\b",
+        "stair_component": r"\b(?:stair(?:case)?|tread|riser|landing)\b",
+        "furniture_or_fixture": r"\b(?:desk|chair|cabinet|basin|WC|urinal|shower|bed)\b",
+    }
+    for name, pattern in rules.items():
+        if re.search(pattern, joined, re.I):
+            exclusions.append(name)
+    return {"hints": hints, "exclusion_signals": exclusions}
+
+
+def _classify_pair_context(labels):
+    context = _semantic_context(labels)
+    exclusions, hints = context["exclusion_signals"], context["hints"]
+    if "tank_or_reservoir" in exclusions or "mechanical_equipment" in exclusions:
+        return "equipment_outline_candidate", 0.36, "nearby_equipment_or_tank_text"
+    if "stair_component" in exclusions:
+        return "stair_boundary_candidate", 0.36, "nearby_stair_text"
+    if "furniture_or_fixture" in exclusions:
+        return "unclassified_parallel_line_pair_candidate", 0.28, "nearby_fixture_or_furniture_text"
+    if "wall" in hints:
+        return "wall_edge_pair_candidate", 0.52, "explicit_nearby_wall_text"
+    return "unclassified_parallel_line_pair_candidate", 0.30, "no_explicit_wall_text"
+
+
+def _near_page_edge(value, extent, margin_ratio=0.035):
+    margin = extent * margin_ratio
+    return value <= margin or value >= extent - margin
+
+
+def _in_title_block(x, y, page_width, page_height):
+    # Standard drawing title blocks commonly occupy the lower-right sheet corner.
+    return x >= page_width * 0.80 and y >= page_height * 0.78
+
+
+
+def _in_main_drawing_viewport(bbox, page_width, page_height):
+    """Exclude sheet frame, left notes, right legend/key plan/title block, and footer."""
+    cx = (bbox[0] + bbox[2]) / 2
+    cy = (bbox[1] + bbox[3]) / 2
+    return (page_width * 0.17 <= cx <= page_width * 0.82
+            and page_height * 0.10 <= cy <= page_height * 0.92)
+
+def _line_is_page_frame_or_border(line, page_width, page_height):
+    (x1, y1), (x2, y2) = line["a"], line["b"]
+    dx, dy = abs(x2 - x1), abs(y2 - y1)
+    if dx >= page_width * 0.68 or dy >= page_height * 0.68:
+        return True
+    if dx >= page_width * 0.18 and dy <= 1.0:
+        y = (y1 + y2) / 2
+        if _near_page_edge(y, page_height, 0.045):
+            return True
+    if dy >= page_height * 0.18 and dx <= 1.0:
+        x = (x1 + x2) / 2
+        if _near_page_edge(x, page_width, 0.045):
+            return True
+    return False
+
+
+def _collect_page_geometry(page):
+    lines, rectangles = [], []
+    paths = page.get_drawings()
+    page_width, page_height = float(page.rect.width), float(page.rect.height)
+    for path_index, path in enumerate(paths):
+        for item_index, item in enumerate(path.get("items", [])):
+            line = _line_from_item(item)
+            if line:
+                a, b = line
+                length = _distance(a, b)
+                if length >= 6 and len(lines) < MAX_LINES_PER_PAGE:
+                    entry = {"a": a, "b": b, "length": length,
+                             "path_index": path_index, "item_index": item_index}
+                    if not _line_is_page_frame_or_border(entry, page_width, page_height):
+                        lines.append(entry)
+            rect = _rect_from_item(item)
+            if rect and len(rectangles) < MAX_RECTS_PER_PAGE:
+                rect = _normalize_rect(rect)
+                w, h = _rect_dims(rect)
+                if w >= 2 and h >= 2 and w * h >= 20:
+                    cx, cy = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+                    if not _near_page_edge(cx, page_width, 0.012) and not _near_page_edge(cy, page_height, 0.012):
+                        rectangles.append({"bbox": rect, "width": w, "height": h,
+                                           "path_index": path_index, "item_index": item_index})
+    return lines, rectangles, len(paths)
+
+
+def _candidate_in_excluded_zone(bbox, page_width, page_height):
+    cx = (bbox[0] + bbox[2]) / 2
+    cy = (bbox[1] + bbox[3]) / 2
+    return _in_title_block(cx, cy, page_width, page_height)
+
+
+def _rectangle_candidates(rectangles, text_spans, page_number, page_width, page_height):
+    candidates, seen = [], set()
+    for item in rectangles:
+        w, h = item["width"], item["height"]
+        short_side, long_side = min(w, h), max(w, h)
+        ratio, area = long_side / max(short_side, 0.001), w * h
+        bbox = [round(v, 2) for v in item["bbox"]]
+        if _candidate_in_excluded_zone(bbox, page_width, page_height):
+            continue
+        if not _in_main_drawing_viewport(bbox, page_width, page_height):
+            continue
+        key = tuple(round(v / 2.0) for v in bbox)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels = _near_text_labels(text_spans, bbox, page_width=page_width, page_height=page_height)
+        semantic = _semantic_context(labels)
+        if 4 <= short_side <= 90 and ratio <= 2.4 and area <= 8100:
+            if "column" in semantic["hints"] and not semantic["exclusion_signals"]:
+                kind, confidence = "column_candidate", 0.48
+                evidence = ["Compact rectangular footprint with nearby explicit column text"]
+            else:
+                kind, confidence = "rectangular_footprint_candidate", 0.24
+                evidence = ["Compact closed rectangle; no explicit column label supports column classification"]
+        elif short_side >= 2.5 and long_side >= 30 and ratio >= 3.2:
+            kind, confidence = "elongated_member_or_boundary_candidate", 0.28
+            evidence = ["Elongated closed rectangular geometry; may be a member, wall, frame, or detail"]
+        else:
+            continue
+        candidates.append({
+            "element_type": kind, "geometry_type": "rectangular_footprint_or_strip",
+            "page_number": page_number, "bbox_pdf_points": bbox,
+            "dimensions_pdf_points": {"width": round(w, 3), "height": round(h, 3)},
+            "evidence": evidence, "nearby_text": labels,
+            "semantic_text_hints": _text_semantic_hints(labels),
+            "confidence": confidence, "verification_required": True,
+            "source": {"path_index": item["path_index"], "item_index": item["item_index"]},
+        })
+    return candidates
+
+
+def _interval(line, orientation):
+    if orientation == "horizontal":
+        return sorted((line["a"][0], line["b"][0]))
+    return sorted((line["a"][1], line["b"][1]))
+
+
+def _line_center(line, orientation):
+    if orientation == "horizontal":
+        return (line["a"][1] + line["b"][1]) / 2
+    return (line["a"][0] + line["b"][0]) / 2
+
+
+def _bbox_iou(a, b):
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    return inter / max(area_a + area_b - inter, 0.001)
+
+
+def _near_duplicate_parallel_pair(candidate, existing, iou_threshold=0.82):
+    """Detect repeated representations of the same thin parallel-line pair.
+
+    Thin wall boxes can have modest IoU even when they describe virtually the
+    same geometry. Compare orientation, longitudinal overlap, centre offset,
+    and estimated thickness in addition to ordinary bbox IoU.
+    """
+    a = candidate.get("bbox_pdf_points")
+    b = existing.get("bbox_pdf_points")
+    if not a or not b:
+        return False
+    if _bbox_iou(a, b) >= iou_threshold:
+        return True
+    if candidate.get("geometry_type") != existing.get("geometry_type"):
+        return False
+    if not str(candidate.get("geometry_type", "")).startswith("parallel_"):
+        return False
+
+    horizontal = candidate["geometry_type"] == "parallel_horizontal_lines"
+    if horizontal:
+        a0, a1, ac = min(a[0], a[2]), max(a[0], a[2]), (a[1] + a[3]) / 2
+        b0, b1, bc = min(b[0], b[2]), max(b[0], b[2]), (b[1] + b[3]) / 2
+    else:
+        a0, a1, ac = min(a[1], a[3]), max(a[1], a[3]), (a[0] + a[2]) / 2
+        b0, b1, bc = min(b[1], b[3]), max(b[1], b[3]), (b[0] + b[2]) / 2
+    shorter = min(a1 - a0, b1 - b0)
+    if shorter <= 0:
+        return False
+    overlap = max(0.0, min(a1, b1) - max(a0, b0))
+    overlap_ratio = overlap / shorter
+    thickness_a = float(candidate.get("estimated_thickness_pdf_points", 0) or 0)
+    thickness_b = float(existing.get("estimated_thickness_pdf_points", 0) or 0)
+    centre_delta = abs(ac - bc)
+    thickness_delta = abs(thickness_a - thickness_b)
+    thickness_limit = max(2.0, 0.35 * max(thickness_a, thickness_b, 1.0))
+    centre_limit = max(2.0, 0.25 * max(thickness_a, thickness_b, 1.0))
+    return (overlap_ratio >= 0.90 and centre_delta <= centre_limit
+            and thickness_delta <= thickness_limit)
+
+
+def _deduplicate_candidates(candidates, iou_threshold=0.82):
+    """Keep the strongest candidate when the same geometry is emitted twice."""
+    kept = []
+    for candidate in sorted(candidates, key=lambda c: c.get("confidence", 0), reverse=True):
+        bbox = candidate.get("bbox_pdf_points")
+        if not bbox:
+            kept.append(candidate)
+            continue
+        duplicate = False
+        for existing in kept:
+            if candidate.get("element_type") != existing.get("element_type"):
+                continue
+            if _near_duplicate_parallel_pair(candidate, existing, iou_threshold):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(candidate)
+    return kept
+
+
+def _point_to_segment_distance(point, line):
+    """Shortest distance from a point to a PDF line segment."""
+    px, py = point
+    (x1, y1), (x2, y2) = line["a"], line["b"]
+    dx, dy = x2 - x1, y2 - y1
+    denom = dx * dx + dy * dy
+    if denom <= 1e-12:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / denom))
+    qx, qy = x1 + t * dx, y1 + t * dy
+    return math.hypot(px - qx, py - qy)
+
+
+def _endpoint_connection_count(line, other_lines, tolerance=2.0):
+    """Count endpoints that meet another source line; not proof of a wall."""
+    endpoints = (line["a"], line["b"])
+    count = 0
+    for endpoint in endpoints:
+        if any(_point_to_segment_distance(endpoint, other) <= tolerance
+               for other in other_lines):
+            count += 1
+    return count
+
+
+def _wall_pair_candidates(lines, text_spans, page_number, page_width, page_height,
+                          max_candidates=MAX_WALL_CANDIDATES_PER_PAGE):
+    """Conservative plan-only wall-edge hypotheses with geometric deduplication."""
+    horizontal, vertical = [], []
+    for line in lines:
+        (x1, y1), (x2, y2) = line["a"], line["b"]
+        dx, dy = abs(x2 - x1), abs(y2 - y1)
+        if dx >= 48 and dy <= 0.65 and dx <= page_width * 0.42:
+            horizontal.append(line)
+        elif dy >= 48 and dx <= 0.65 and dy <= page_height * 0.42:
+            vertical.append(line)
+
+    result = []
+    for orientation, collection in (("horizontal", horizontal), ("vertical", vertical)):
+        ordered = sorted(collection, key=lambda ln: _line_center(ln, orientation))
+        for i, a in enumerate(ordered):
+            a0, a1 = _interval(a, orientation)
+            ca = _line_center(a, orientation)
+            for b in ordered[i + 1:]:
+                cb = _line_center(b, orientation)
+                gap = cb - ca
+                if gap > 18:
+                    break
+                if gap < 3.0:
+                    continue
+                b0, b1 = _interval(b, orientation)
+                overlap = min(a1, b1) - max(a0, b0)
+                shorter, longer = min(a1 - a0, b1 - b0), max(a1 - a0, b1 - b0)
+                if shorter <= 0 or overlap < 42:
+                    continue
+                overlap_ratio = overlap / shorter
+                length_ratio = shorter / max(longer, 0.001)
+                if overlap_ratio < 0.82 or length_ratio < 0.65:
+                    continue
+                if a["path_index"] == b["path_index"] and abs(a["item_index"] - b["item_index"]) <= 1:
+                    continue
+                if orientation == "horizontal":
+                    bbox = [max(a0, b0), ca, min(a1, b1), cb]
+                else:
+                    bbox = [ca, max(a0, b0), cb, min(a1, b1)]
+                bbox = [round(v, 2) for v in bbox]
+                if _candidate_in_excluded_zone(bbox, page_width, page_height):
+                    continue
+                if not _in_main_drawing_viewport(bbox, page_width, page_height):
+                    continue
+                labels = _near_text_labels(text_spans, bbox, max_distance=24,
+                                           page_width=page_width, page_height=page_height)
+                context = _semantic_context(labels)
+                hints = context["hints"]
+                candidate_kind, confidence, classification_basis = _classify_pair_context(labels)
+
+                # Stage 5.1.6: add endpoint/topology evidence for unlabelled wall
+                # pairs. This is a candidate-level signal only, not BIM validation.
+                other_lines = [ln for ln in lines if ln is not a and ln is not b]
+                connections_a = _endpoint_connection_count(a, other_lines)
+                connections_b = _endpoint_connection_count(b, other_lines)
+                endpoint_support = connections_a + connections_b
+                geometric_support = {
+                    "connected_endpoints_line_a": connections_a,
+                    "connected_endpoints_line_b": connections_b,
+                    "connected_endpoints_total": endpoint_support,
+                    "connection_tolerance_pdf_points": 2.0,
+                    "interpretation": "endpoint_topology_hint_not_proof",
+                }
+                if (candidate_kind == "unclassified_parallel_line_pair_candidate"
+                        and not context["exclusion_signals"]
+                        and 3.0 <= gap <= 18.0
+                        and endpoint_support >= 3):
+                    candidate_kind = "wall_geometry_supported_candidate"
+                    confidence = 0.42
+                    classification_basis = "parallel_pair_with_endpoint_connectivity"
+                if gap <= 12 and candidate_kind == "wall_edge_pair_candidate":
+                    confidence += 0.03
+                result.append({
+                    "element_type": candidate_kind,
+                    "geometry_type": f"parallel_{orientation}_lines",
+                    "page_number": page_number, "bbox_pdf_points": bbox,
+                    "estimated_thickness_pdf_points": round(gap, 3),
+                    "overlap_length_pdf_points": round(overlap, 3),
+                    "overlap_ratio": round(overlap_ratio, 3),
+                    "line_length_ratio": round(length_ratio, 3),
+                    "evidence": [
+                        "Two near-parallel axis-aligned line segments",
+                        "Spacing, overlap, and relative-length filters passed",
+                        "Candidate is inside the main drawing viewport",
+                        "Sheet notes, legends, key-plan and title-block zones are excluded",
+                    ],
+                    "nearby_text": labels, "semantic_text_hints": hints,
+                    "semantic_context": context,
+                    "geometric_support": geometric_support,
+                    "classification_basis": classification_basis,
+                    "confidence": min(0.55, round(confidence, 2)),
+                    "verification_required": True,
+                    "source": {"line_a": [a["path_index"], a["item_index"]],
+                               "line_b": [b["path_index"], b["item_index"]]},
+                })
+                if len(result) >= max_candidates:
+                    return _deduplicate_candidates(result)
+    return _deduplicate_candidates(result)
+
+
+def recognize_pdf_elements(pdf_path: str | Path, drawing_record: dict) -> dict:
+    if fitz is None:
+        raise RuntimeError("PyMuPDF is required for Stage 5.1.6. Install pymupdf.")
+    path = Path(pdf_path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+
+    doc = fitz.open(path)
+    pages_out, totals = [], defaultdict(int)
+    drawing_kind, drawing_confidence, classification_evidence = "unknown", 0.0, []
+    try:
+        for page_index, page in enumerate(doc):
+            page_no = page_index + 1
+            text_spans = _page_text_spans(page)
+            if page_index == 0:
+                drawing_kind, drawing_confidence, classification_evidence = _classify_drawing(
+                    drawing_record.get("filename", path.name), text_spans
+                )
+            lines, rects, path_count = _collect_page_geometry(page)
+            page_width, page_height = float(page.rect.width), float(page.rect.height)
+            policy = _drawing_extraction_policy(drawing_kind)
+
+            # Do not interpret arbitrary schedule/detail/elevation rectangles as
+            # columns or walls. Geometric hypotheses are currently enabled only
+            # for plan-family sheets where the heuristics have a defensible context.
+            candidates = []
+            if drawing_kind == "floor_plan":
+                candidates.extend(_rectangle_candidates(
+                    rects, text_spans, page_no, page_width, page_height
+                ))
+                candidates.extend(_wall_pair_candidates(
+                    lines, text_spans, page_no, page_width, page_height
+                ))
+            elif drawing_kind == "site_plan":
+                candidates.extend(_rectangle_candidates(
+                    rects, text_spans, page_no, page_width, page_height
+                ))
+                # Site-plan parallel lines are not labelled as architectural walls.
+                for item in _wall_pair_candidates(
+                    lines, text_spans, page_no, page_width, page_height
+                ):
+                    item["element_type"] = "site_boundary_or_linear_feature_candidate"
+                    item["confidence"] = min(item["confidence"], 0.40)
+                    item["evidence"].append(
+                        "Site-plan context: this pair may be a boundary, kerb, path, or other linear feature"
+                    )
+                    candidates.append(item)
+
+            candidates = _deduplicate_candidates(candidates)
+            text_evidence = _page_text_evidence(text_spans, page_width, page_height)
+            for candidate in candidates:
+                totals[candidate["element_type"]] += 1
+            pages_out.append({
+                "page_number": page_no,
+                "page_size_pdf_points": {"width": round(page_width, 3), "height": round(page_height, 3)},
+                "source_path_count": path_count, "line_count_considered": len(lines),
+                "rectangle_count_considered": len(rects),
+                "drawing_type": drawing_kind,
+                "extraction_policy": policy,
+                "text_evidence_count": len(text_evidence),
+                "text_evidence": text_evidence,
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+            })
+    finally:
+        doc.close()
+
+    return {
+        "schema_version": SCHEMA_VERSION, "recognition_version": RECOGNITION_VERSION,
+        "stage": "5.1.6", "drawing_id": drawing_record.get("id"),
+        "filename": drawing_record.get("filename", path.name), "source_pdf": path.name,
+        "drawing_family": drawing_kind,
+        "extraction_policy": _drawing_extraction_policy(drawing_kind),
+        "source_sha256": _sha256_file(path), "generated_at": _now(),
+        "drawing_classification": {
+            "type": drawing_kind, "confidence": drawing_confidence,
+            "evidence": classification_evidence, "verification_required": True,
+        },
+        "coordinate_system": {
+            "unit": "pdf_point", "origin": "top_left", "x_axis": "right",
+            "y_axis": "down", "real_world_scale_status": "unresolved",
+        },
+        "summary": {
+            "page_count": len(pages_out),
+            "candidate_count": sum(p["candidate_count"] for p in pages_out),
+            "candidate_counts_by_type": dict(totals),
+        },
+        "pages": pages_out,
+        "limitations": [
+            "All outputs are unverified review candidates, not verified engineering elements.",
+            "Near-duplicate parallel-pair suppression reduces repeated representations but does not prove physical wall identity.",
+            "Drawing classification is heuristic and must be reviewed.",
+            "PDF-space dimensions are not real-world dimensions until scale is calibrated.",
+            "Rectangles and line pairs remain geometric hypotheses and may still represent symbols, equipment, or annotations.",
+            "Viewport filtering reduces sheet-furniture noise but does not establish engineering correctness.",
+            "Raster-only geometry is not recognized by this vector-based pass.",
+            "No 3D geometry or Revit elements are generated in Stage 5.1.3 2.",
+        ],
+    }
+
+
+def analyze_project_elements(
+    project_dir: str | Path,
+    project: dict,
+    *,
+    filename: str | None = None,
+    batch_size: int = 1,
+) -> dict:
+    if not isinstance(batch_size, int) or not 1 <= batch_size <= 5:
+        raise ValueError("batch_size must be between 1 and 5")
+
+    root = Path(project_dir)
+    drawings_dir = root / "drawings"
+    artifact = root / "artifacts" / "engineering_element_candidates_stage5_1_6.json"
+    previous = {}
+    if artifact.is_file():
+        try:
+            previous = json.loads(artifact.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+
+    # Reuse only same-version results whose source PDF hash still matches.
+    cached = {}
+    for item in previous.get("drawings", []):
+        did = str(item.get("drawing_id") or "")
+        if did and item.get("recognition_version") == RECOGNITION_VERSION:
+            cached[did] = item
+
+    records = project.get("drawings", [])
+    if filename:
+        matches = [r for r in records
+                   if str(r.get("filename", "")).casefold() == filename.strip().casefold()]
+        if len(matches) != 1:
+            raise ValueError("Filename must exactly match one unique project PDF.")
+        selected = matches
+    else:
+        selected = records
+
+    pending, missing = [], []
+    for record in selected:
+        did = str(record.get("id") or "")
+        stored = record.get("stored_filename")
+        pdf = drawings_dir / Path(stored or "").name
+        if not stored or not pdf.is_file():
+            missing.append({"drawing_id": did, "filename": record.get("filename"),
+                            "reason": "Stored PDF is missing"})
+            continue
+        old = cached.get(did)
+        if old:
+            try:
+                if old.get("source_sha256") == _sha256_file(pdf):
+                    continue
+            except OSError:
+                pass
+        pending.append((record, pdf))
+
+    newly_processed = []
+    for record, pdf in pending[:batch_size]:
+        try:
+            result = recognize_pdf_elements(pdf, record)
+            cached[str(record.get("id"))] = result
+            newly_processed.append(str(record.get("id")))
+        except Exception as exc:
+            missing.append({"drawing_id": record.get("id"),
+                            "filename": record.get("filename"),
+                            "reason": f"{type(exc).__name__}: {exc}"})
+
+    drawings_out = list(cached.values())
+    candidate_totals = defaultdict(int)
+    for drawing in drawings_out:
+        for key, value in drawing.get("summary", {}).get("candidate_counts_by_type", {}).items():
+            candidate_totals[key] += value
+
+    report = {
+        "schema_version": SCHEMA_VERSION, "recognition_version": RECOGNITION_VERSION,
+        "stage": "5.1.6",
+        "status": "completed" if len(drawings_out) >= len(records) else "in_progress",
+        "project_id": project.get("id"), "project_name": project.get("name"),
+        "generated_at": _now(),
+        "summary": {
+            "drawing_count": len(records), "recognized_drawing_count": len(drawings_out),
+            "newly_processed_count": len(newly_processed),
+            "remaining_count": max(len(records) - len(drawings_out), 0),
+            "failed_or_missing_count": len(missing),
+            "candidate_counts_by_type": dict(candidate_totals),
+            "wall_candidates_with_explicit_wall_text": sum(
+                1 for d in drawings_out for page in d.get("pages", [])
+                for c in page.get("candidates", [])
+                if c.get("element_type") == "wall_edge_pair_candidate"
+                and c.get("classification_basis") == "explicit_nearby_wall_text"
+            ),
+            "unclassified_parallel_pairs": candidate_totals.get(
+                "unclassified_parallel_line_pair_candidate", 0
+            ),
+            "wall_candidates_supported_by_endpoint_connectivity": candidate_totals.get(
+                "wall_geometry_supported_candidate", 0
+            ),
+            "batch_size": batch_size,
+        },
+        "drawings": drawings_out, "failed_or_missing": missing,
+        "recognition_policy": "drawing_family_aware_plan_geometry_endpoint_connectivity_and_nonplan_text_evidence_require_engineering_verification",
+        "limitations": [
+            "Candidate geometry only; no semantic BIM objects are asserted.",
+            "Scale calibration and cross-drawing validation are not implemented.",
+            "Raster-only geometry requires a separate image-recognition stage.",
+            "Only floor/site plan families currently generate geometric hypotheses.",
+            "Stage 5.1.6 classifications remain hypotheses and require engineering review.",
+            "Other drawing families are classified and indexed for text evidence; their geometry recognition is future work.",
+        ],
+    }
+
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    temp = artifact.with_suffix(artifact.suffix + ".tmp")
+    temp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(artifact)
+    report["report_file"] = str(artifact)
+    return report

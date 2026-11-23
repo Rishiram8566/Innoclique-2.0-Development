@@ -1,0 +1,552 @@
+"""Stage 5.2: evidence-led drawing scale calibration and PDF-to-mm conversion.
+
+Calibration is never guessed from a title-block scale string or dimension text.
+A user/engineer supplies two PDF-page control points and the known real distance
+between them. The resulting transform is stored separately from Stage 5.0/5.1.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+import json
+import math
+import re
+from decimal import Decimal
+
+ARTIFACT_NAME = "drawing_scale_calibration_stage5_2.json"
+UNIT_TO_MM = {"mm": 1.0, "millimetre": 1.0, "millimeter": 1.0,
+              "cm": 10.0, "m": 1000.0, "metre": 1000.0, "meter": 1000.0,
+              "in": 25.4, "inch": 25.4, "inches": 25.4,
+              "ft": 304.8, "feet": 304.8, "foot": 304.8}
+DIM_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<num>(?:\d{1,3}(?:,\d{3})+|\d{1,7})(?:\.\d+)?)\s*"
+    r"(?P<unit>mm|millimet(?:er|re)s?|cm|m|met(?:er|re)s?|inches|inch|in|ft|feet|foot)\b",
+    re.I,
+)
+SCALE_RE = re.compile(r"\b(?:scale\s*[:=]?\s*)?(?P<a>1)\s*[:/]\s*(?P<b>\d{1,5})\b", re.I)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_json(path: Path, default: Any) -> Any:
+    if not path.is_file():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _json_safe(value):
+    """Convert ijson Decimal values into JSON-compatible numeric values."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _write_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=_json_safe), encoding="utf-8")
+    temp.replace(path)
+
+
+def _dimension_value(text: str):
+    match = DIM_RE.search(text or "")
+    if not match:
+        return None
+    unit = match.group("unit").lower()
+    factor = UNIT_TO_MM.get(unit)
+    if factor is None:
+        return None
+    try:
+        value = float(match.group("num").replace(",", ""))
+    except ValueError:
+        return None
+    return {"text": match.group(0), "value": value, "unit": unit,
+            "value_mm": round(value * factor, 6)}
+
+
+def _load_geometry(project_folder: Path) -> dict:
+    path = project_folder / "artifacts" / "drawing_geometry_stage5.json"
+    report = _read_json(path, None)
+    if not isinstance(report, dict) or not isinstance(report.get("drawings"), list):
+        raise FileNotFoundError(
+            "Stage 5.0 geometry artifact is missing or invalid. "
+            "Expected artifacts/drawing_geometry_stage5.json."
+        )
+    return report
+
+
+def _page_evidence(page: dict) -> dict:
+    dimensions = []
+    for candidate in page.get("dimension_candidates", []):
+        span = candidate.get("source_span") or {}
+        parsed = _dimension_value(candidate.get("value_text", ""))
+        if parsed:
+            dimensions.append({
+                **parsed,
+                "page_number": page.get("page_number"),
+                "bbox_pdf_points": span.get("bbox"),
+                "source": "stage5_0_dimension_candidate",
+                "confidence": candidate.get("confidence", 0.55),
+                "verification_required": True,
+            })
+    scales = []
+    for span in page.get("text_spans", []):
+        text = span.get("text", "")
+        for match in SCALE_RE.finditer(text):
+            scales.append({
+                "text": match.group(0),
+                "ratio": f"1:{match.group('b')}",
+                "denominator": int(match.group("b")),
+                "bbox_pdf_points": span.get("bbox"),
+                "source": "native_pdf_text",
+                "verification_required": True,
+                "note": "Printed scale is evidence only; it is not applied automatically.",
+            })
+    return {"dimension_evidence": dimensions, "printed_scale_evidence": scales}
+
+
+def build_calibration_preview(project_folder: str | Path, project_id: str) -> dict:
+    folder = Path(project_folder)
+    geometry = _load_geometry(folder)
+    results = []
+    for drawing in geometry.get("drawings", []):
+        pages = []
+        for page in drawing.get("pages", []):
+            evidence = _page_evidence(page)
+            pages.append({
+                "page_number": page.get("page_number"),
+                "page_size_pdf_points": page.get("page_size_pdf_points"),
+                "coordinate_frame": page.get("coordinate_frame"),
+                "vector_primitive_count": page.get("vector_primitive_count", 0),
+                "text_span_count": page.get("text_span_count", 0),
+                **evidence,
+                "calibration_status": "unresolved",
+            })
+        results.append({
+            "drawing_id": drawing.get("drawing_id"),
+            "filename": drawing.get("filename"),
+            "source_sha256": drawing.get("source_sha256") or drawing.get("source", {}).get("sha256"),
+            "pages": pages,
+        })
+    existing = _read_json(folder / "artifacts" / ARTIFACT_NAME, {})
+    calibration_map = existing.get("calibrations", {}) if isinstance(existing, dict) else {}
+    for drawing in results:
+        saved = calibration_map.get(str(drawing.get("drawing_id")), {})
+        for page in drawing["pages"]:
+            key = str(page["page_number"])
+            if key in saved:
+                page["calibration_status"] = saved[key].get("status", "calibrated")
+                page["calibration"] = saved[key]
+    summary = {
+        "geometry_drawings_available": len(results),
+        "page_count": sum(len(item["pages"]) for item in results),
+        "dimension_evidence_count": sum(len(p["dimension_evidence"]) for d in results for p in d["pages"]),
+        "printed_scale_evidence_count": sum(len(p["printed_scale_evidence"]) for d in results for p in d["pages"]),
+        "calibrated_page_count": sum(p["calibration_status"] == "calibrated" for d in results for p in d["pages"]),
+        "unresolved_page_count": sum(p["calibration_status"] != "calibrated" for d in results for p in d["pages"]),
+    }
+    return {
+        "schema_version": "0.1.0",
+        "stage": "5.2.1",
+        "project_id": project_id,
+        "generated_at": _now(),
+        "status": "ready_for_control_point_calibration" if results else "no_geometry",
+        "summary": summary,
+        "drawings": results,
+        "method": "Evidence discovery only. No scale is inferred or applied without explicit control points and a known real-world distance.",
+        "coordinate_convention": {
+            "source_unit": "PDF point (1/72 inch)",
+            "source_origin": "top_left",
+            "source_x_axis": "right",
+            "source_y_axis": "down",
+            "target_unit": "millimetre",
+            "target_origin": "top_left",
+            "target_x_axis": "right",
+            "target_y_axis": "down",
+        },
+        "limitations": [
+            "Dimension strings and printed scale labels are candidates, not proof of drawing scale.",
+            "Scanned/image-only drawings may have no native text or vector geometry evidence.",
+            "A calibration is valid only for the specified drawing page and source PDF version.",
+            "One page calibration must not be assumed to apply to other pages or separately exported sheets.",
+        ],
+    }
+
+
+def calibrate_page(
+    project_folder: str | Path, project_id: str, *, drawing_id: str, page_number: int,
+    point_a_pdf: list[float], point_b_pdf: list[float], known_distance: float,
+    unit: str, source_reference: str,
+) -> dict:
+    folder = Path(project_folder)
+    geometry = _load_geometry(folder)
+    drawings = {str(d.get("drawing_id")): d for d in geometry.get("drawings", [])}
+    drawing = drawings.get(str(drawing_id))
+    if not drawing:
+        raise ValueError("drawing_id was not found in the Stage 5.0 geometry artifact.")
+    pages = {int(p.get("page_number")): p for p in drawing.get("pages", [])}
+    page = pages.get(int(page_number))
+    if not page:
+        raise ValueError("page_number was not found in the selected drawing.")
+    if len(point_a_pdf) != 2 or len(point_b_pdf) != 2:
+        raise ValueError("Each control point must contain exactly [x, y].")
+    coords = [*point_a_pdf, *point_b_pdf]
+    if not all(math.isfinite(float(v)) for v in coords):
+        raise ValueError("Control-point coordinates must be finite numbers.")
+    width = float(page["page_size_pdf_points"]["width"])
+    height = float(page["page_size_pdf_points"]["height"])
+    for x, y in (point_a_pdf, point_b_pdf):
+        if not (0 <= float(x) <= width and 0 <= float(y) <= height):
+            raise ValueError("Control point lies outside the selected PDF page.")
+    distance_pdf = math.hypot(
+        float(point_b_pdf[0]) - float(point_a_pdf[0]),
+        float(point_b_pdf[1]) - float(point_a_pdf[1]),
+    )
+    if distance_pdf <= 1e-6:
+        raise ValueError("Control points must be distinct.")
+    if not math.isfinite(float(known_distance)) or float(known_distance) <= 0:
+        raise ValueError("known_distance must be a positive number.")
+    normalized_unit = str(unit).strip().lower()
+    if normalized_unit not in UNIT_TO_MM:
+        raise ValueError(f"Unsupported unit. Choose one of: {', '.join(sorted(UNIT_TO_MM))}")
+    reference = str(source_reference).strip()
+    if len(reference) < 3:
+        raise ValueError("source_reference is required (for example, verified dimension label or engineer instruction).")
+    known_mm = float(known_distance) * UNIT_TO_MM[normalized_unit]
+    mm_per_point = known_mm / distance_pdf
+    points_per_metre = 1000.0 / mm_per_point
+    record = {
+        "status": "calibrated",
+        "method": "two_user_supplied_control_points_and_known_distance",
+        "drawing_id": str(drawing_id),
+        "filename": drawing.get("filename"),
+        "page_number": int(page_number),
+        "source_sha256": drawing.get("source_sha256") or drawing.get("source", {}).get("sha256"),
+        "control_points_pdf": {"a": [float(point_a_pdf[0]), float(point_a_pdf[1])],
+                               "b": [float(point_b_pdf[0]), float(point_b_pdf[1])]},
+        "distance_pdf_points": round(distance_pdf, 8),
+        "known_distance": float(known_distance),
+        "known_distance_unit": normalized_unit,
+        "known_distance_mm": round(known_mm, 6),
+        "millimetres_per_pdf_point": round(mm_per_point, 12),
+        "pdf_points_per_metre": round(points_per_metre, 8),
+        "source_reference": reference,
+        "verification_required": True,
+        "calibrated_at": _now(),
+    }
+    target = folder / "artifacts" / ARTIFACT_NAME
+    report = _read_json(target, {})
+    if not isinstance(report, dict) or not isinstance(report.get("calibrations"), dict):
+        report = {"schema_version": "0.1.0", "stage": "5.2.2", "project_id": project_id,
+                  "created_at": _now(), "calibrations": {}}
+    report.setdefault("calibrations", {}).setdefault(str(drawing_id), {})[str(page_number)] = record
+    report["stage"] = "5.2.2"
+    report["updated_at"] = _now()
+    report["method_note"] = "Only explicitly supplied control points and known dimensions are used; no inferred scale is silently accepted."
+    _write_atomic(target, report)
+    return {"project_id": project_id, "calibration": record, "artifact_file": str(target)}
+
+
+def get_calibration_report(project_folder: str | Path) -> dict:
+    path = Path(project_folder) / "artifacts" / ARTIFACT_NAME
+    report = _read_json(path, None)
+    if report is None:
+        raise FileNotFoundError(f"No Stage 5.2 calibration exists yet: {ARTIFACT_NAME}")
+    return report
+
+
+def _get_page_calibration(project_folder: str | Path, drawing_id: str, page_number: int) -> dict:
+    """Return a saved page calibration or raise a clear validation error."""
+    report = get_calibration_report(project_folder)
+    record = (report.get("calibrations", {})
+                    .get(str(drawing_id), {})
+                    .get(str(page_number)))
+    if not isinstance(record, dict) or record.get("status") != "calibrated":
+        raise ValueError(
+            f"No valid calibration exists for drawing {drawing_id}, page {page_number}."
+        )
+    scale = record.get("millimetres_per_pdf_point")
+    if not isinstance(scale, (int, float)) or not math.isfinite(float(scale)) or float(scale) <= 0:
+        raise ValueError("Saved calibration has an invalid millimetres_per_pdf_point value.")
+    return record
+
+
+def pdf_point_to_mm(point: list[float] | tuple[float, float],
+                    millimetres_per_pdf_point: float,
+                    origin_pdf: list[float] | tuple[float, float] = (0.0, 0.0)) -> list[float]:
+    """Convert a PDF point to page-local millimetres (top-left origin, +X right, +Y down).
+
+    The page origin is explicitly [0, 0]. This creates page-local coordinates;
+    it does not establish a shared building/site coordinate system.
+    """
+    if len(point) != 2 or len(origin_pdf) != 2:
+        raise ValueError("PDF point and origin must each contain exactly [x, y].")
+    values = [float(point[0]), float(point[1]),
+              float(origin_pdf[0]), float(origin_pdf[1]),
+              float(millimetres_per_pdf_point)]
+    if not all(math.isfinite(v) for v in values) or values[4] <= 0:
+        raise ValueError("Coordinate values must be finite and scale must be positive.")
+    scale = values[4]
+    return [round((values[0] - values[2]) * scale, 6),
+            round((values[1] - values[3]) * scale, 6)]
+
+
+def transform_primitive_for_page(project_folder: str | Path, *, drawing_id: str,
+                                 page_number: int, primitive: dict) -> dict:
+    """Transform one Stage 5.0 line/bezier/quad primitive without changing source data."""
+    if not isinstance(primitive, dict):
+        raise ValueError("primitive must be a JSON object.")
+    if int(primitive.get("page_number", page_number)) != int(page_number):
+        raise ValueError("Primitive page_number does not match the requested calibrated page.")
+    record = _get_page_calibration(project_folder, drawing_id, page_number)
+    scale = float(record["millimetres_per_pdf_point"])
+    kind = str(primitive.get("type", "")).lower()
+    if kind == "line":
+        if not isinstance(primitive.get("start"), (list, tuple)) or not isinstance(primitive.get("end"), (list, tuple)):
+            raise ValueError("Line primitive must contain start and end coordinate pairs.")
+        transformed = {
+            "start_mm": pdf_point_to_mm(primitive["start"], scale),
+            "end_mm": pdf_point_to_mm(primitive["end"], scale),
+        }
+    elif kind in {"bezier", "quad"}:
+        points = primitive.get("points")
+        expected = 4
+        if not isinstance(points, list) or len(points) != expected:
+            raise ValueError(f"{kind} primitive must contain exactly four points.")
+        transformed = {"points_mm": [pdf_point_to_mm(p, scale) for p in points]}
+    else:
+        raise ValueError(f"Unsupported primitive type '{kind}'. Supported types: line, bezier, quad.")
+    return {
+        "drawing_id": str(drawing_id),
+        "page_number": int(page_number),
+        "primitive_type": kind,
+        "source_pdf_coordinates": (
+            {"start": primitive["start"], "end": primitive["end"]}
+            if kind == "line" else {"points": primitive["points"]}
+        ),
+        "coordinates_mm": transformed,
+        "transform": {
+            "method": "uniform_scale_from_explicit_two_point_calibration",
+            "millimetres_per_pdf_point": scale,
+            "origin_pdf": [0.0, 0.0],
+            "coordinate_frame": "page_local_top_left_origin_x_right_y_down",
+            "target_unit": "mm",
+        },
+        "calibration_verification_required": bool(record.get("verification_required", True)),
+        "calibration_source_reference": record.get("source_reference"),
+    }
+
+
+
+def transform_primitive_batch(
+    project_folder: str | Path, *, drawing_id: str, page_number: int,
+    start_index: int = 0, batch_size: int = 1000,
+) -> dict:
+    """Transform a bounded primitive batch using event-based JSON parsing.
+
+    Parses the project report incrementally and builds only the requested
+    primitive records. It does not materialize a complete drawing or page.
+    """
+    try:
+        import ijson
+        from ijson.common import ObjectBuilder
+    except ImportError as exc:
+        raise RuntimeError(
+            "Streaming dependency missing. Install with: "
+            "python -m pip install ijson"
+        ) from exc
+
+    if start_index < 0:
+        raise ValueError("start_index must be zero or greater.")
+    if not 1 <= batch_size <= 5000:
+        raise ValueError("batch_size must be between 1 and 5000.")
+
+    folder = Path(project_folder)
+    source_path = folder / "artifacts" / "drawing_geometry_stage5.json"
+    if not source_path.is_file():
+        raise FileNotFoundError("Stage 5.0 geometry artifact is missing.")
+
+    calibration = _get_page_calibration(folder, drawing_id, page_number)
+
+    total = 0
+    selected = []
+    drawing_found = False
+    page_found = False
+    current_drawing_id = None
+    current_page_number = None
+
+    with source_path.open("rb") as source:
+        events = iter(ijson.parse(source))
+
+        while True:
+            try:
+                prefix, event, value = next(events)
+            except StopIteration:
+                break
+
+            if prefix == "drawings.item.drawing_id" and event in ("string", "number"):
+                current_drawing_id = str(value)
+                if current_drawing_id == str(drawing_id):
+                    drawing_found = True
+
+            elif (
+                prefix == "drawings.item.pages.item.page_number"
+                and event in ("number", "string")
+            ):
+                current_page_number = int(value)
+                if (
+                    current_drawing_id == str(drawing_id)
+                    and current_page_number == int(page_number)
+                ):
+                    page_found = True
+
+            elif (
+                prefix == "drawings.item.pages.item"
+                and event == "end_map"
+            ):
+                current_page_number = None
+
+            elif (
+                prefix == "drawings.item.pages.item.primitives.item"
+                and event == "start_map"
+                and current_drawing_id == str(drawing_id)
+                and current_page_number == int(page_number)
+            ):
+                builder = ObjectBuilder()
+                builder.event(event, value)
+                depth = 1
+
+                while depth:
+                    try:
+                        _, child_event, child_value = next(events)
+                    except StopIteration as exc:
+                        raise ValueError(
+                            "Unexpected end of JSON while reading a primitive."
+                        ) from exc
+
+                    builder.event(child_event, child_value)
+
+                    if child_event in ("start_map", "start_array"):
+                        depth += 1
+                    elif child_event in ("end_map", "end_array"):
+                        depth -= 1
+
+                primitive = builder.value
+                if not isinstance(primitive, dict):
+                    raise ValueError(
+                        "Invalid primitive record in Stage 5.0 artifact."
+                    )
+
+                if start_index <= total < start_index + batch_size:
+                    selected.append(primitive)
+
+                total += 1
+
+    if not drawing_found:
+        raise ValueError(
+            f"Drawing {drawing_id} was not found in Stage 5.0 geometry."
+        )
+    if not page_found:
+        raise ValueError(
+            f"Page {page_number} was not found in drawing {drawing_id}."
+        )
+    if start_index > total:
+        raise ValueError(
+            f"start_index {start_index} exceeds primitive count {total}."
+        )
+
+    transformed = []
+    failures = []
+
+    for local_index, primitive in enumerate(selected):
+        absolute_index = start_index + local_index
+        try:
+            item = transform_primitive_for_page(
+                folder,
+                drawing_id=drawing_id,
+                page_number=page_number,
+                primitive=primitive,
+            )
+            item["primitive_index"] = absolute_index
+            transformed.append(item)
+        except (TypeError, ValueError, KeyError) as exc:
+            failures.append({
+                "primitive_index": absolute_index,
+                "error": str(exc),
+            })
+
+    artifacts = folder / "artifacts" / "coordinate_transform_stage5_2_4"
+    artifacts.mkdir(parents=True, exist_ok=True)
+
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(drawing_id))
+    end_index = start_index + len(selected)
+    chunk_name = (
+        f"{safe_id}_page_{int(page_number)}_{start_index}_{end_index}.jsonl"
+    )
+    chunk_path = artifacts / chunk_name
+    temp_path = chunk_path.with_suffix(chunk_path.suffix + ".tmp")
+
+    with temp_path.open("w", encoding="utf-8", newline="\n") as out:
+        for item in transformed:
+            out.write(
+                json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=_json_safe,
+                ) + "\n"
+            )
+    temp_path.replace(chunk_path)
+
+    next_index = end_index
+    complete = next_index >= total
+
+    checkpoint = {
+        "schema_version": "0.1.0",
+        "stage": "5.2.4",
+        "drawing_id": str(drawing_id),
+        "page_number": int(page_number),
+        "source_artifact": "drawing_geometry_stage5.json",
+        "source_size_bytes": source_path.stat().st_size,
+        "source_mtime_ns": source_path.stat().st_mtime_ns,
+        "calibration_at": calibration.get("calibrated_at"),
+        "total_primitives": total,
+        "next_start_index": next_index,
+        "complete": complete,
+        "updated_at": _now(),
+    }
+
+    checkpoint_path = (
+        artifacts / f"{safe_id}_page_{int(page_number)}_checkpoint.json"
+    )
+    _write_atomic(checkpoint_path, checkpoint)
+
+    return {
+        "stage": "5.2.4",
+        "drawing_id": str(drawing_id),
+        "page_number": int(page_number),
+        "start_index": start_index,
+        "next_start_index": next_index,
+        "batch_size_requested": batch_size,
+        "primitives_in_batch": len(selected),
+        "transformed_count": len(transformed),
+        "failed_count": len(failures),
+        "failures": failures[:50],
+        "total_primitives": total,
+        "complete": complete,
+        "output_jsonl": str(chunk_path),
+        "checkpoint_file": str(checkpoint_path),
+        "calibration_verification_required": bool(
+            calibration.get("verification_required", True)
+        ),
+        "note": (
+            "Page-local millimetres only; "
+            "not a shared building coordinate system."
+        ),
+    }

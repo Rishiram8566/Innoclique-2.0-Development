@@ -1,0 +1,59 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# Generated project data and artifacts
+backend/data/
+backend/uploads/
+backend/artifacts/
+backend/outputs/
+backend/output/
+artifacts/
+uploads/
+outputs/
+
+# Engineering source files and large drawings
+*.pdf
+*.dwg
+*.dxf
+*.rvt
+*.rfa
+*.ifc
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local inspection images and accidental file
+/*.png
+/backend/*.png
+ervices*
+
+# Local drawing register
+/docs/*.xlsx
+
+# All backup copies
+*backup*
+*Backup*
+*.bak
+*.stage5_backup
+*.pre_integration_backup
+*.tsbuildinfo
