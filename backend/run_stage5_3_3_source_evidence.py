@@ -1,3 +1,11 @@
+"""
+LEGACY FIXTURE SCRIPT - not a pipeline stage.
+
+Pinned (by project ID, drawing ID and SHA-256 checks) to the repaired
+ARC-1002 validation fixture of the older project 5e9627a7-...-c2e2c5baf845.
+Kept for reproducibility of past validation runs only. Do not adapt it to run
+against other projects; use the project-wide stage runners instead.
+"""
 
 from __future__ import annotations
 

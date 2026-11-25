@@ -1,29 +1,24 @@
+"""
+Stage 5.2.17 - evidence-to-geometry association.
 
+Usage (from the backend folder):
+    python run_stage5_2_17_evidence_geometry_association.py --project-id <uuid>
+"""
+
+import argparse
 import json
 import os
 from pathlib import Path
 
+from stage_script_args import add_project_argument, project_folder
 from app.services.evidence_geometry_association import (
     analyze_evidence_geometry_associations,
 )
 
 
-PROJECT_ID = "5e9627a7-1b4b-41ea-8ac9-c2e2c5baf845"
-
-PROJECT_DIR = Path("data/projects") / PROJECT_ID
-ARTIFACT_DIR = PROJECT_DIR / "artifacts"
-
-RECOGNITION_PATH = (
-    ARTIFACT_DIR / "engineering_element_candidates_stage5_1_6.json"
-)
-
-EVIDENCE_PATH = (
-    ARTIFACT_DIR / "evidence_relationships_stage5_2_12.json"
-)
-
-OUTPUT_PATH = (
-    ARTIFACT_DIR / "evidence_geometry_association_stage5_2_17.json"
-)
+RECOGNITION_FILENAME = "engineering_element_candidates_stage5_1_6.json"
+EVIDENCE_FILENAME = "evidence_relationships_stage5_2_12.json"
+OUTPUT_FILENAME = "evidence_geometry_association_stage5_2_17.json"
 
 
 def read_json(path: Path) -> dict:
@@ -55,11 +50,24 @@ def write_json_atomic(path: Path, data: dict) -> None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Stage 5.2.17 evidence-to-geometry association")
+    add_project_argument(parser)
+    project_id = parser.parse_args().project_id
+
+    artifact_dir = project_folder(project_id) / "artifacts"
+    recognition_path = artifact_dir / RECOGNITION_FILENAME
+    evidence_path = artifact_dir / EVIDENCE_FILENAME
+    output_path = artifact_dir / OUTPUT_FILENAME
+
     print("\nSTAGE 5.2.17 - EVIDENCE-TO-GEOMETRY ASSOCIATION")
     print("=" * 60)
 
-    recognition = read_json(RECOGNITION_PATH)
-    evidence = read_json(EVIDENCE_PATH)
+    recognition = read_json(recognition_path)
+    evidence = read_json(evidence_path)
+
+    for name, report in (("Recognition", recognition), ("Evidence", evidence)):
+        if report.get("project_id") not in (None, project_id):
+            raise ValueError(f"{name} artifact belongs to another project")
 
     print("Recognition artifact loaded.")
     print("Evidence artifact loaded.")
@@ -69,15 +77,15 @@ def main():
         evidence,
     )
 
-    write_json_atomic(OUTPUT_PATH, result)
+    write_json_atomic(output_path, result)
 
     summary = result["summary"]
 
     print("\nSTAGE 5.2.17 COMPLETED")
     print("-" * 60)
 
-    print("Project ID:", PROJECT_ID)
-    print("Output:", OUTPUT_PATH)
+    print("Project ID:", project_id)
+    print("Output:", output_path)
 
     print("\nSUMMARY")
 

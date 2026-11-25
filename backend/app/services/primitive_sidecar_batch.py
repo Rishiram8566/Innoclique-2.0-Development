@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from uuid import UUID
 
 from app.services.drawing_geometry_extractor import (
     fitz,
@@ -12,15 +13,24 @@ from app.services.drawing_geometry_extractor import (
     _sha256_file,
 )
 
-PROJECT_ID = "a5482b08-1c59-4bf0-9eb2-7ea41eb26f9c"
 BATCH_SIZE = 10000
 INDEX_STRIDE = 1000
 
-PROJECT = Path("data/projects") / PROJECT_ID
-DRAWINGS = PROJECT / "drawings"
-ARTIFACTS = PROJECT / "artifacts"
-METADATA = ARTIFACTS / "drawing_geometry_stage5_metadata_index.json"
-OUTPUT = ARTIFACTS / "primitive_sidecars"
+PROJECTS_DIR = Path(__file__).resolve().parents[2] / "data" / "projects"
+
+# Set from --project-id in main(); there is no default project.
+PROJECT = DRAWINGS = ARTIFACTS = METADATA = OUTPUT = None
+
+
+def _configure(project_id: str) -> None:
+    global PROJECT, DRAWINGS, ARTIFACTS, METADATA, OUTPUT
+    PROJECT = PROJECTS_DIR / str(UUID(project_id))
+    if not PROJECT.is_dir():
+        raise SystemExit(f"Project folder not found: {PROJECT}")
+    DRAWINGS = PROJECT / "drawings"
+    ARTIFACTS = PROJECT / "artifacts"
+    METADATA = ARTIFACTS / "drawing_geometry_stage5_metadata_index.json"
+    OUTPUT = ARTIFACTS / "primitive_sidecars"
 
 
 def write_page(drawing, page_meta):
@@ -183,10 +193,14 @@ def write_page(drawing, page_meta):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Write per-page primitive sidecars (python -m app.services.primitive_sidecar_batch)"
+    )
+    parser.add_argument("--project-id", required=True)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--drawing-id", default=None)
     args = parser.parse_args()
+    _configure(args.project_id)
 
     if not METADATA.is_file():
         raise FileNotFoundError(METADATA)

@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import SceneViewer from './SceneViewer';
 import HeightVerificationPanel from './HeightVerificationPanel';
+import ModelViewer3D from './ModelViewer3D';
 import {
   Building2,
   FileUp,
@@ -197,7 +198,7 @@ export default function App() {
           </div>
 
           <span className="tag">
-            <ShieldCheck size={14} /> PDF input Â· CAD not required
+            <ShieldCheck size={14} /> PDF input · CAD not required
           </span>
         </div>
 
@@ -234,7 +235,7 @@ export default function App() {
             onClick={createProject}
             disabled={busy || name.trim().length < 2}
           >
-            Create project <span>â†’</span>
+            Create project <span>→</span>
           </button>
         </div>
       </section>
@@ -247,7 +248,7 @@ export default function App() {
           </div>
 
           <span className="tag">
-            <FolderOpen size={14} /> One project Â· Multiple PDFs
+            <FolderOpen size={14} /> One project · Multiple PDFs
           </span>
         </div>
 
@@ -279,7 +280,7 @@ export default function App() {
             <small>
               {files?.length
                 ? `${files.length} file(s) selected`
-                : 'Up to 100 PDFs per batch Â· No fixed project PDF-count limit'}
+                : 'Up to 100 PDFs per batch · No fixed project PDF-count limit'}
             </small>
           </div>
 
@@ -309,7 +310,7 @@ export default function App() {
               onClick={upload}
               disabled={busy || !active || !files?.length}
             >
-              Upload drawings <span>â†‘</span>
+              Upload drawings <span>↑</span>
             </button>
 
             <div className="notice">
@@ -380,7 +381,25 @@ export default function App() {
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">05 / PROJECT LIBRARY</span>
+            <span className="eyebrow">05 / STAGE 5.4 3D MODEL</span>
+            <h2>Verified 3D model</h2>
+          </div>
+          <span className="tag">Reviewer-confirmed walls only · LOD 100–500</span>
+        </div>
+
+        {active && selectedDrawingId ? (
+          <ModelViewer3D projectId={active.id} drawingId={selectedDrawingId} />
+        ) : (
+          <div className="message">
+            Select a project and a drawing sheet above to view its 3D model.
+          </div>
+        )}
+      </section>
+
+      <section className="workspace">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">06 / PROJECT LIBRARY</span>
             <h2>Your projects</h2>
           </div>
 
@@ -414,12 +433,12 @@ export default function App() {
                   <strong>{project.name}</strong>
 
                   <small>
-                    {project.project_type.replace(/_/g, ' ')} Â·{' '}
+                    {project.project_type.replace(/_/g, ' ')} ·{' '}
                     {project.drawings?.length ?? 0} PDF(s)
                   </small>
                 </div>
 
-                <span className="row-arrow">â†’</span>
+                <span className="row-arrow">→</span>
               </button>
             ))
           )}
@@ -429,7 +448,7 @@ export default function App() {
       <section className="future">
         <div className="future-head">
           <Layers3 size={18} />
-          <span>ENGINEERING PIPELINE â€” DEVELOPMENT ROADMAP</span>
+          <span>ENGINEERING PIPELINE — DEVELOPMENT ROADMAP</span>
         </div>
 
         <div className="roadmap">
@@ -442,7 +461,7 @@ export default function App() {
           <div className="road-item">
             <b>02</b>
             <strong>Drawing AI</strong>
-            <small>OCR Â· symbols Â· dimensions</small>
+            <small>OCR · symbols · dimensions</small>
           </div>
 
           <div className="road-item">
@@ -453,7 +472,7 @@ export default function App() {
 
           <div className="road-item">
             <b>04</b>
-            <strong>LOD 100â€“500</strong>
+            <strong>LOD 100–500</strong>
             <small>Progressive detail</small>
           </div>
 

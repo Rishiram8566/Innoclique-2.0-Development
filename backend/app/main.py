@@ -41,6 +41,8 @@ from app.services.bim_geometry_preview import router as bim_geometry_preview_rou
 from app.services.phase6_scene import router as phase6_scene_router
 from app.services.height_association_router import router as height_association_router
 from app.services.height_verification_router import router as height_verification_router
+from app.services.height_verification_ledger import load_ledger, screen_mesh_elements
+from app.services.wall_mesh_generation_router import router as wall_mesh_generation_router
 
 
 
@@ -74,6 +76,7 @@ app.include_router(bim_geometry_preview_router)
 app.include_router(phase6_scene_router)
 app.include_router(height_association_router)
 app.include_router(height_verification_router)
+app.include_router(wall_mesh_generation_router)
 
 app.add_middleware(
 
@@ -1987,17 +1990,11 @@ def get_drawing_meshes(project_id: str, drawing_id: str):
 
 
 
-    artifact_path = (
-
-        folder
-
-        / "artifacts"
-
-        / "mesh_batches"
-
-        / f"{safe_drawing_id}_stage5_3.json"
-
-    )
+    # Prefer the Stage 5.4 verified model; fall back to an older Stage 5.3 batch.
+    mesh_dir = folder / "artifacts" / "mesh_batches"
+    artifact_path = mesh_dir / f"{safe_drawing_id}_stage5_4.json"
+    if not artifact_path.is_file():
+        artifact_path = mesh_dir / f"{safe_drawing_id}_stage5_3.json"
 
 
 
@@ -2149,4 +2146,23 @@ def get_drawing_meshes(project_id: str, drawing_id: str):
 
 
 
-    return JSONResponse(content=artifact)
+    # Serve only walls whose height a reviewer has confirmed (Stage 5.3.5).
+    # Meshes built with assumed/test heights or revoked verifications are withheld.
+    try:
+        ledger = load_ledger(folder, safe_project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid height verification ledger: {exc}") from exc
+
+    served, withheld = screen_mesh_elements(elements, ledger)
+
+    response = dict(artifact)
+    response["elements"] = served
+    response["withheld_elements"] = withheld
+    response["serving_gate"] = {
+        "rule": "drawing_derived height with an active reviewer-confirmed verification",
+        "elements_in_artifact": len(elements),
+        "served": len(served),
+        "withheld": len(withheld),
+    }
+
+    return JSONResponse(content=response)

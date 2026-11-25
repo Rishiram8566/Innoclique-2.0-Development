@@ -8,12 +8,12 @@ import os
 import tempfile
 from pathlib import Path
 
+from stage_script_args import uuid_arg
 from app.services.evidence_deduplication import (
     STAGE,
     deduplicate_evidence,
 )
 
-DEFAULT_PROJECT_ID = "5e9627a7-1b4b-41ea-8ac9-c2e2c5baf845"
 
 INPUT_FILENAME = "vertical_level_evidence_stage5_2_11.json"
 OUTPUT_FILENAME = "evidence_relationships_stage5_2_12.json"
@@ -130,7 +130,8 @@ def main() -> None:
 
     parser.add_argument(
         "--project-id",
-        default=DEFAULT_PROJECT_ID,
+        required=True,
+        type=uuid_arg,
     )
 
     parser.add_argument(

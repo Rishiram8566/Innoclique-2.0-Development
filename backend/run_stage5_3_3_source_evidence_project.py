@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import ijson
 
+from stage_script_args import add_project_argument
 from app.services.geometry_source_evidence import (
     build_geometry_source_evidence_report,
 )
@@ -17,25 +19,22 @@ from app.services.geometry_source_evidence import (
 
 BASE_DIR = Path(__file__).resolve().parent
 
-PROJECT_ID = "a5482b08-1c59-4bf0-9eb2-7ea41eb26f9c"
+PROJECT_ID = None  # set from --project-id in main()
 
-ARTIFACTS_DIR = (
-    BASE_DIR / "data" / "projects" / PROJECT_ID / "artifacts"
-)
+ARTIFACTS_DIR = None
+RECOGNITION_FILE = None
+GEOMETRY_FILE = None
+OUTPUT_FILE = None
 
-RECOGNITION_FILE = (
-    ARTIFACTS_DIR
-    / "engineering_element_candidates_stage5_1_6.json"
-)
 
-GEOMETRY_FILE = (
-    ARTIFACTS_DIR / "drawing_geometry_stage5.json"
-)
+def _configure(project_id: str) -> None:
+    global PROJECT_ID, ARTIFACTS_DIR, RECOGNITION_FILE, GEOMETRY_FILE, OUTPUT_FILE
+    PROJECT_ID = project_id
+    ARTIFACTS_DIR = BASE_DIR / "data" / "projects" / project_id / "artifacts"
+    RECOGNITION_FILE = ARTIFACTS_DIR / "engineering_element_candidates_stage5_1_6.json"
+    GEOMETRY_FILE = ARTIFACTS_DIR / "drawing_geometry_stage5.json"
+    OUTPUT_FILE = ARTIFACTS_DIR / "geometry_source_evidence_stage5_3_3_v2.json"
 
-OUTPUT_FILE = (
-    ARTIFACTS_DIR
-    / "geometry_source_evidence_stage5_3_3_v2.json"
-)
 
 MAX_DISTANCE = 24.0
 
@@ -111,6 +110,10 @@ def write_json_atomic(path: Path, data: dict) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Stage 5.3.3 project-wide source evidence")
+    add_project_argument(parser)
+    _configure(parser.parse_args().project_id)
+
     print("=" * 65)
     print("STAGE 5.3.3 - PROJECT-WIDE SOURCE EVIDENCE")
     print("=" * 65)

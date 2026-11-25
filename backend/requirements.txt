@@ -4,3 +4,12 @@ python-multipart>=0.0.9
 pydantic>=2.7
 pydantic-settings>=2.2
 pymupdf>=1.24
+
+# Streams the multi-GB Stage 5.0 geometry artifact without loading it whole.
+ijson>=3.2
+
+# Optional OCR for PDF pages with little native text. OCR also needs the
+# Tesseract program installed separately; set TESSERACT_CMD if it is not on
+# PATH or in C:\Program Files\Tesseract-OCR.
+Pillow>=10.0
+pytesseract>=0.3.10

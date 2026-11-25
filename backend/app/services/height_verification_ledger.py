@@ -762,13 +762,13 @@ def load_ledger(folder: Path, project_id: str) -> dict[str, Any]:
     return ledger
 
 
-def save_ledger(folder: Path, ledger: dict[str, Any]) -> Path:
-    path = Path(folder) / "artifacts" / LEDGER_ARTIFACT_NAME
+def save_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=path.stem + "_", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(ledger, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -780,3 +780,65 @@ def save_ledger(folder: Path, ledger: dict[str, Any]) -> Path:
             pass
         raise
     return path
+
+
+def save_ledger(folder: Path, ledger: dict[str, Any]) -> Path:
+    return save_json_atomic(Path(folder) / "artifacts" / LEDGER_ARTIFACT_NAME, ledger)
+
+
+# ---------------------------------------------------------------------------
+# Mesh serving gate
+# ---------------------------------------------------------------------------
+
+def _height_values(element: dict[str, Any]) -> list[float]:
+    values = []
+    dimensions = element.get("dimensions_mm")
+    if isinstance(dimensions, dict) and isinstance(dimensions.get("height"), (int, float)):
+        values.append(float(dimensions["height"]))
+    provenance = element.get("provenance")
+    evidence = provenance.get("height_evidence") if isinstance(provenance, dict) else None
+    if isinstance(evidence, dict) and isinstance(evidence.get("height_mm"), (int, float)):
+        values.append(float(evidence["height_mm"]))
+    return values
+
+
+def screen_mesh_elements(
+    elements: list[dict[str, Any]], ledger: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Split mesh elements into (served, withheld).
+
+    An element is served only when its height is drawing-derived AND an
+    active, reviewer-confirmed Stage 5.3.5 verification exists for that exact
+    element with the same height. Anything else, including meshes built with
+    assumed or test heights, is withheld with the reasons.
+    """
+    served, withheld = [], []
+    for element in elements:
+        element_id = str(element.get("element_id") or "")
+        reasons = []
+
+        height_status = str(element.get("height_status") or "")
+        if "assumed" in height_status.lower() or "test" in height_status.lower():
+            reasons.append(f"Height status is '{height_status}', not drawing-derived.")
+
+        provenance = element.get("provenance")
+        evidence = provenance.get("height_evidence") if isinstance(provenance, dict) else None
+        if not isinstance(evidence, dict) or evidence.get("status") != "drawing_derived":
+            reasons.append("Mesh provenance has no drawing-derived height evidence.")
+
+        verified = resolve_builder_height_evidence(ledger, element_id) if element_id else None
+        if verified is None:
+            reasons.append("No active reviewer-confirmed height verification for this element.")
+        else:
+            heights = _height_values(element)
+            if not heights or any(abs(h - float(verified["height_mm"])) > 1e-6 for h in heights):
+                reasons.append(
+                    f"Mesh height {heights} differs from the verified height {verified['height_mm']}."
+                )
+
+        if reasons:
+            withheld.append({"element_id": element_id or None, "reasons": reasons})
+        else:
+            served.append(element)
+    return served, withheld

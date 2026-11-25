@@ -394,3 +394,70 @@ def test_element_source_lines_parses_builder_ids():
     prefix, lines = ledger_service.element_source_lines(element(106530, 29))
     assert prefix == f"{DRAWING}:p1"
     assert lines == frozenset({(106530, 0), (29, 0)})
+
+
+# ------------------------------------------------------------ mesh gate
+
+def mesh_element(element_id, height=1200.0, height_status="drawing_derived_requires_verification",
+                 evidence_status="drawing_derived"):
+    return {
+        "element_id": element_id,
+        "height_status": height_status,
+        "dimensions_mm": {"height": height},
+        "provenance": {"height_evidence": {"height_mm": height, "status": evidence_status}},
+        "mesh": {"vertices": [], "faces": []},
+    }
+
+
+def confirmed_ledger():
+    ledger = ledger_service.empty_ledger(PROJECT)
+    ledger_service.apply_verification(ledger, make_record(ledger=ledger))
+    return ledger
+
+
+def test_gate_serves_only_verified_matching_heights():
+    served, withheld = ledger_service.screen_mesh_elements(
+        [mesh_element(element(1, 2)), mesh_element(element(3, 4))], confirmed_ledger(),
+    )
+    assert [e["element_id"] for e in served] == [element(1, 2)]
+    assert withheld[0]["element_id"] == element(3, 4)
+    assert any("No active reviewer-confirmed" in r for r in withheld[0]["reasons"])
+
+
+def test_gate_withholds_assumed_test_heights():
+    # The old project's mesh batch used height_status "assumed_test_value".
+    served, withheld = ledger_service.screen_mesh_elements(
+        [mesh_element(element(1, 2), height=3000.0, height_status="assumed_test_value",
+                      evidence_status="assumed")],
+        confirmed_ledger(),
+    )
+    assert served == []
+    reasons = " ".join(withheld[0]["reasons"])
+    assert "assumed_test_value" in reasons
+    assert "differs from the verified height" in reasons
+
+
+def test_gate_withholds_height_mismatch_and_revoked_verifications():
+    ledger = confirmed_ledger()
+    served, withheld = ledger_service.screen_mesh_elements(
+        [mesh_element(element(1, 2), height=1500.0)], ledger,
+    )
+    assert served == [] and "differs" in withheld[0]["reasons"][0]
+
+    record = ledger["verifications"][0]
+    ledger_service.revoke_verification(
+        ledger, record["verification_id"], reviewer="Test Reviewer",
+        reason="Verification revoked during gate testing.",
+    )
+    served, withheld = ledger_service.screen_mesh_elements([mesh_element(element(1, 2))], ledger)
+    assert served == []
+
+
+def test_gate_withholds_missing_provenance():
+    element_without_provenance = mesh_element(element(1, 2))
+    del element_without_provenance["provenance"]
+    served, withheld = ledger_service.screen_mesh_elements(
+        [element_without_provenance], confirmed_ledger(),
+    )
+    assert served == []
+    assert any("drawing-derived height evidence" in r for r in withheld[0]["reasons"])

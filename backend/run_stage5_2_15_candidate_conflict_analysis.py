@@ -12,12 +12,12 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from stage_script_args import uuid_arg
 from app.services.candidate_conflict_analysis import (
     analyze_candidate_conflicts,
 )
 
 
-DEFAULT_PROJECT_ID = "5e9627a7-1b4b-41ea-8ac9-c2e2c5baf845"
 
 INPUT_FILENAME = "engineering_element_candidates_stage5_1_6.json"
 OUTPUT_FILENAME = "candidate_conflict_analysis_stage5_2_15_v2.json"
@@ -74,7 +74,8 @@ def main() -> int:
 
     parser.add_argument(
         "--project-id",
-        default=DEFAULT_PROJECT_ID,
+        required=True,
+        type=uuid_arg,
         help="Project ID to analyze.",
     )
 
