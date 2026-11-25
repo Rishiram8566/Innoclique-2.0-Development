@@ -1,6 +1,7 @@
 ﻿
 import { useEffect, useState } from 'react';
 import SceneViewer from './SceneViewer';
+import HeightVerificationPanel from './HeightVerificationPanel';
 import {
   Building2,
   FileUp,
@@ -361,7 +362,25 @@ export default function App() {
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">04 / PROJECT LIBRARY</span>
+            <span className="eyebrow">04 / STAGE 5.3.5 HEIGHT VERIFICATION</span>
+            <h2>Wall-height verification</h2>
+          </div>
+          <span className="tag">Human decision · Audited · No auto-approval</span>
+        </div>
+
+        {active && selectedDrawingId ? (
+          <HeightVerificationPanel projectId={active.id} drawingId={selectedDrawingId} />
+        ) : (
+          <div className="message">
+            Select a project and a drawing sheet above to verify wall heights.
+          </div>
+        )}
+      </section>
+
+      <section className="workspace">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">05 / PROJECT LIBRARY</span>
             <h2>Your projects</h2>
           </div>
 

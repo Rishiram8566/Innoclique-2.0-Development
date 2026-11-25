@@ -4,7 +4,7 @@ import { Bounds, OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 
 const API = 'http://127.0.0.1:8000/api';
-const PDF_PREVIEW_SCALE = 1.5;
+export const PDF_PREVIEW_SCALE = 1.5;
 
 type SceneElement = {
   element_id: string;
@@ -152,7 +152,7 @@ function Footprint({ element }: { element: DisplayElement }) {
   );
 }
 
-function PdfPage({ url }: { url: string }) {
+export function PdfPage({ url }: { url: string }) {
   const texture = useLoader(THREE.TextureLoader, url);
   const image = texture.image as HTMLImageElement;
   const pageWidth = image.width / PDF_PREVIEW_SCALE;

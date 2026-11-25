@@ -39,6 +39,8 @@ from app.services.scale_calibration import (
 )
 from app.services.bim_geometry_preview import router as bim_geometry_preview_router
 from app.services.phase6_scene import router as phase6_scene_router
+from app.services.height_association_router import router as height_association_router
+from app.services.height_verification_router import router as height_verification_router
 
 
 
@@ -70,6 +72,8 @@ app = FastAPI(
 
 app.include_router(bim_geometry_preview_router)
 app.include_router(phase6_scene_router)
+app.include_router(height_association_router)
+app.include_router(height_verification_router)
 
 app.add_middleware(
 
