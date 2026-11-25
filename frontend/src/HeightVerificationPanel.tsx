@@ -1,6 +1,6 @@
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { Bounds, OrbitControls } from '@react-three/drei';
+import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import { PdfPage } from './SceneViewer';
 
@@ -286,6 +286,20 @@ export default function HeightVerificationPanel({
     internalOverlap.length === 0 &&
     overlapConfirmed.length === 0;
 
+  // Say exactly why Confirm is disabled instead of leaving a greyed-out button.
+  const missing: string[] = [];
+  if (selected.size === 0) missing.push('select at least one wall candidate');
+  if (!heightCandidate) missing.push('choose a height candidate');
+  else if (!heightCandidate.confirmable) missing.push('choose a single height (a range cannot be confirmed)');
+  if (heightCandidate && cited.size === 0) missing.push('cite at least one source annotation');
+  if (reviewer.trim().length < 2) missing.push('enter your name in Reviewer name');
+  if (justification.trim().length < MIN_TEXT) {
+    missing.push(`write a justification of at least ${MIN_TEXT} characters`);
+  }
+  if (heightCandidate && cited.size > 0 && !citesThisDrawing && crossJustification.trim().length < MIN_TEXT) {
+    missing.push('add a cross-drawing justification');
+  }
+
   function toggle(id: string) {
     setSelected(previous => {
       const next = new Set(previous);
@@ -411,8 +425,7 @@ export default function HeightVerificationPanel({
             <Canvas orthographic camera={{ position: [0, 0, 1500], zoom: 1, near: 0.1, far: 5000 }}>
               <color attach="background" args={['#0b1220']} />
               <Suspense fallback={null}>
-                <Bounds fit clip observe margin={1.04}>
-                  <group>
+                <group>
                     <PdfPage url={previewUrl} />
                     {view.candidates.map(candidate => {
                       const isSelected = selected.has(candidate.element_id);
@@ -435,7 +448,6 @@ export default function HeightVerificationPanel({
                       );
                     })}
                   </group>
-                </Bounds>
               </Suspense>
               <OrbitControls makeDefault enableRotate={false} enablePan enableZoom />
             </Canvas>
@@ -634,6 +646,11 @@ export default function HeightVerificationPanel({
                 Clear selection
               </button>
             </div>
+            {!canConfirm && missing.length > 0 && (
+              <small style={{ color: '#fbbf24' }}>
+                To enable Confirm: {missing.join('; ')}.
+              </small>
+            )}
             <small style={{ color: '#8fa1b5' }}>
               Confirming records a human decision only. No geometry is generated here; Stage 5.4
               still checks calibration, source lines and mesh validity.

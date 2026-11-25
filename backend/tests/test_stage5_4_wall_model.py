@@ -214,3 +214,23 @@ def test_bad_ids_are_404(project):
         with pytest.raises(HTTPException) as error:
             router_module.generate_verified_wall_model(project_id, drawing_id=drawing_id, page_number=1)
         assert error.value.status_code == 404
+
+
+@pytest.mark.parametrize("value,expected", [
+    ({"width": 2384.0, "height": 1684.0}, (2384.0, 1684.0)),   # format used by Stage 5.1.6
+    ([1000, 800], (1000.0, 800.0)),
+    (None, None),
+    ({"width": 0, "height": 10}, None),
+    ("bad", None),
+])
+def test_page_size_accepts_recognition_formats(value, expected):
+    assert generation._page_size(value) == expected
+
+
+def test_dict_page_size_reaches_artifact(project):
+    recognition = json.loads(json.dumps(RECOGNITION))
+    recognition["drawings"][0]["pages"][0]["page_size_pdf_points"] = {"width": 1000.0, "height": 800.0}
+    (project / "artifacts" / ledger_service.RECOGNITION_ARTIFACT_NAME).write_text(json.dumps(recognition), "utf-8")
+    confirm(project, [element(1, 2)])
+    artifact, _ = generation.generate_page_model(project, PROJECT, DRAWING, 1)
+    assert artifact["page"]["size_mm"] == [10000.0, 8000.0]

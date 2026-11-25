@@ -47,6 +47,20 @@ def output_artifact_name(drawing_id: str) -> str:
     return f"{drawing_id}_stage5_4.json"
 
 
+def _page_size(value: Any) -> tuple[float, float] | None:
+    """Page size as (width, height); recognition stores {"width", "height"} or [w, h]."""
+    try:
+        if isinstance(value, dict):
+            width, height = float(value["width"]), float(value["height"])
+        elif isinstance(value, (list, tuple)) and len(value) == 2:
+            width, height = float(value[0]), float(value[1])
+        else:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -235,10 +249,10 @@ def build_verified_wall_model(
             failed.append({"element_id": element_id, "reason": str(exc)})
 
     scale = float(calibration["millimetres_per_pdf_point"])
-    page_size = page.get("page_size_pdf_points")
+    page_size = _page_size(page.get("page_size_pdf_points"))
     page_size_mm = (
-        [round(float(page_size[0]) * scale, 3), round(float(page_size[1]) * scale, 3)]
-        if isinstance(page_size, (list, tuple)) and len(page_size) == 2 else None
+        [round(page_size[0] * scale, 3), round(page_size[1] * scale, 3)]
+        if page_size else None
     )
 
     return {
@@ -268,7 +282,7 @@ def build_verified_wall_model(
             "verification_required": calibration.get("verification_required"),
         },
         "page": {
-            "size_pdf_points": page_size,
+            "size_pdf_points": list(page_size) if page_size else None,
             "size_mm": page_size_mm,
         },
         "inputs": {
