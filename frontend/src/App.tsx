@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import SceneViewer from './SceneViewer';
 import HeightVerificationPanel from './HeightVerificationPanel';
 import ModelViewer3D from './ModelViewer3D';
+import CalibrationPanel from './CalibrationPanel';
 import {
   Building2,
   FileUp,
@@ -38,6 +39,8 @@ export default function App() {
   );
   const [busy, setBusy] = useState(false);
   const [selectedDrawingId, setSelectedDrawingId] = useState('');
+  // Bumped after a page calibration so dependent panels reload their mm values.
+  const [calibrationVersion, setCalibrationVersion] = useState(0);
 
   async function refresh() {
     try {
@@ -363,14 +366,36 @@ export default function App() {
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">04 / STAGE 5.3.5 HEIGHT VERIFICATION</span>
+            <span className="eyebrow">04 / STAGE 5.2 CALIBRATION + 5.4 PLACEMENT</span>
+            <h2>Page scale and plan placement</h2>
+          </div>
+          <span className="tag">Scale · level · reference point · never guessed</span>
+        </div>
+
+        {active && selectedDrawingId ? (
+          <CalibrationPanel
+            projectId={active.id}
+            drawingId={selectedDrawingId}
+            onCalibrated={() => setCalibrationVersion(version => version + 1)}
+          />
+        ) : (
+          <div className="message">
+            Select a project and a drawing sheet above to calibrate its scale.
+          </div>
+        )}
+      </section>
+
+      <section className="workspace">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">05 / STAGE 5.3.5 HEIGHT VERIFICATION</span>
             <h2>Wall-height verification</h2>
           </div>
           <span className="tag">Human decision · Audited · No auto-approval</span>
         </div>
 
         {active && selectedDrawingId ? (
-          <HeightVerificationPanel projectId={active.id} drawingId={selectedDrawingId} />
+          <HeightVerificationPanel key={calibrationVersion} projectId={active.id} drawingId={selectedDrawingId} />
         ) : (
           <div className="message">
             Select a project and a drawing sheet above to verify wall heights.
@@ -381,14 +406,14 @@ export default function App() {
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">05 / STAGE 5.4 3D MODEL</span>
+            <span className="eyebrow">06 / STAGE 5.4 3D MODEL</span>
             <h2>Verified 3D model</h2>
           </div>
           <span className="tag">Reviewer-confirmed walls only · LOD 100–500</span>
         </div>
 
         {active && selectedDrawingId ? (
-          <ModelViewer3D projectId={active.id} drawingId={selectedDrawingId} />
+          <ModelViewer3D key={calibrationVersion} projectId={active.id} drawingId={selectedDrawingId} />
         ) : (
           <div className="message">
             Select a project and a drawing sheet above to view its 3D model.
@@ -399,7 +424,7 @@ export default function App() {
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">06 / PROJECT LIBRARY</span>
+            <span className="eyebrow">07 / PROJECT LIBRARY</span>
             <h2>Your projects</h2>
           </div>
 

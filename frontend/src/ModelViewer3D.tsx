@@ -50,6 +50,7 @@ const LOD_NOTES: Record<LOD, string> = {
 
 const COMPONENT_COLORS: Record<string, string> = {
   parapet: '#e2c799',
+  'full-height wall': '#c3cdd8',
   wall: '#cfcac0',
 };
 const CONCRETE = '#c9c5bb';
@@ -175,7 +176,7 @@ function PlanGround({ url, sizeMm }: { url: string; sizeMm: number[] }) {
   );
 }
 
-export default function ModelViewer3D({
+function DrawingModelView({
   projectId,
   drawingId,
 }: {
@@ -413,4 +414,234 @@ function lodButton(active: boolean): React.CSSProperties {
     cursor: 'pointer',
     fontSize: 12,
   };
+}
+
+type BuildingElement = MeshElement & {
+  drawing_id: string;
+  drawing_title: string | null;
+  storey: { placement_id: string; base_level_key: string; base_elevation_mm: number };
+};
+
+type BuildingResponse = {
+  summary: { placed_plans: number; plans_in_model: number; walls_served: number; walls_withheld: number; plans_excluded: number };
+  storeys: {
+    placement_id: string;
+    drawing_title: string | null;
+    base_level_key: string;
+    base_elevation_mm: number;
+    top_level_key: string | null;
+    storey_height_mm: number | null;
+    reference_label: string;
+    walls_served: number;
+    walls_withheld: number;
+  }[];
+  elements: BuildingElement[];
+  withheld_elements: { element_id: string | null; drawing_id: string; reasons: string[] }[];
+  excluded_plans: { drawing_id: string; drawing_title: string | null; reason: string }[];
+  limitations: string[];
+};
+
+function elevation(mmValue: number) {
+  const sign = mmValue >= 0 ? '+' : '−';
+  return `${sign}${Math.abs(mmValue / 1000).toFixed(2)} m`;
+}
+
+function BuildingView({ projectId }: { projectId: string }) {
+  const [data, setData] = useState<BuildingResponse | null>(null);
+  const [error, setError] = useState('');
+  const [lod, setLod] = useState<LOD>('300');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    setError('');
+    fetch(`${API}/projects/${projectId}/model/building`)
+      .then(async response => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(formatDetail(body?.detail) || `Request failed (${response.status})`);
+        if (!cancelled) setData(body as BuildingResponse);
+      })
+      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load the building.'); });
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  const visible = useMemo(
+    () => (data?.elements ?? []).filter(e => Number(lod) >= (e.lod?.minimum_lod ?? 300)),
+    [data, lod],
+  );
+
+  const groundY = useMemo(() => {
+    const zs = (data?.elements ?? []).flatMap(e => e.mesh.vertices.map(v => v[2]));
+    return zs.length ? Math.min(...zs) / MM_PER_M - 0.02 : 0;
+  }, [data]);
+
+  if (error) return <div className="message" style={{ color: '#fbbf24' }}>{error}</div>;
+  if (!data) return <div className="message">Loading building model...</div>;
+
+  const selected = data.elements.find(e => e.element_id === selectedId) ?? null;
+
+  return (
+    <div style={{ display: 'grid', gap: 14, color: '#cbd5e1', fontSize: 13 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18 }}>
+        <span>Placed plans: {data.summary.placed_plans}</span>
+        <span>Storeys in model: {data.summary.plans_in_model}</span>
+        <span>Walls: {data.summary.walls_served}</span>
+        <span style={{ color: data.summary.walls_withheld ? '#fbbf24' : undefined }}>
+          Withheld: {data.summary.walls_withheld}
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ color: '#94a3b8', fontSize: 12 }}>Level of detail</span>
+        {LODS.map(level => (
+          <button key={level} onClick={() => setLod(level)} style={lodButton(lod === level)}>
+            LOD {level}
+          </button>
+        ))}
+      </div>
+      <div style={noteStyle}>{LOD_NOTES[lod]}</div>
+
+      {data.elements.length === 0 ? (
+        <div className="message">
+          No walls in the building yet. For each plan: calibrate it, place it (level + reference point),
+          confirm walls, then generate its walls.
+        </div>
+      ) : (
+        <div style={{
+          height: 560, width: '100%', overflow: 'hidden', borderRadius: 14,
+          border: '1px solid #334155', background: 'linear-gradient(#dfe7ef, #f4f6f8)',
+        }}>
+          <Canvas shadows camera={{ position: [60, 90, 140], fov: 45, near: 0.1, far: 5000 }}>
+            <hemisphereLight args={['#ffffff', '#b0a998', 0.6]} />
+            <ambientLight intensity={0.35} />
+            <directionalLight
+              position={[120, 180, 60]}
+              intensity={1.4}
+              castShadow
+              shadow-mapSize-width={2048}
+              shadow-mapSize-height={2048}
+              shadow-camera-left={-200}
+              shadow-camera-right={200}
+              shadow-camera-top={200}
+              shadow-camera-bottom={-200}
+              shadow-camera-far={600}
+            />
+            <Suspense fallback={null}>
+              <Bounds fit clip observe margin={1.2}>
+                <group onPointerMissed={() => setSelectedId(null)}>
+                  {visible.map(element => (
+                    <Wall
+                      key={element.element_id}
+                      element={element}
+                      lod={lod}
+                      selected={element.element_id === selectedId}
+                      onSelect={setSelectedId}
+                    />
+                  ))}
+                </group>
+              </Bounds>
+              <gridHelper args={[300, 60, '#94a3b8', '#cbd5e1']} position={[0, groundY, 0]} />
+            </Suspense>
+            <OrbitControls makeDefault />
+          </Canvas>
+        </div>
+      )}
+
+      <small style={{ color: '#8fa1b5' }}>
+        Building metres from each plan's shared reference point; heights from the annotated levels you chose.
+        Plans are aligned by translation only (same orientation assumed). Click a wall to inspect.
+      </small>
+
+      {data.storeys.length > 0 && (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr>
+              {['Plan', 'Base level', 'Storey height', 'Reference point', 'Walls', 'Withheld'].map(h => (
+                <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: '#94a3b8', borderBottom: '1px solid #1f2d3d' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.storeys.map(storey => (
+              <tr key={storey.placement_id}>
+                <td style={cell}>{storey.drawing_title}</td>
+                <td style={cell}>{storey.base_level_key} ({elevation(storey.base_elevation_mm)})</td>
+                <td style={cell}>{storey.storey_height_mm ? mm(storey.storey_height_mm) : '—'}</td>
+                <td style={cell}>{storey.reference_label}</td>
+                <td style={cell}>{storey.walls_served}</td>
+                <td style={cell}>{storey.walls_withheld}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {selected && (
+        <div style={{ ...noteStyle, display: 'grid', gap: 6 }}>
+          <strong style={{ color: '#eaf0f8' }}>
+            {(selected.component ?? 'wall').replace(/^./, c => c.toUpperCase())} · {selected.drawing_title}
+          </strong>
+          <span>
+            Length {mm(selected.dimensions_mm.length)} · Thickness {mm(selected.dimensions_mm.thickness)} ·
+            Height {mm(selected.dimensions_mm.height)} · base {selected.storey.base_level_key}
+          </span>
+          {selected.height_verification && (
+            <span>
+              Confirmed by {selected.height_verification.reviewer ?? 'reviewer'} · verification{' '}
+              {selected.height_verification.verification_id}
+            </span>
+          )}
+          <span style={{ color: '#8fa1b5' }}>{selected.element_id}</span>
+        </div>
+      )}
+
+      {data.excluded_plans.length > 0 && (
+        <details open>
+          <summary>{data.excluded_plans.length} plan(s) not in the building yet</summary>
+          <ul>
+            {data.excluded_plans.map((item, index) => (
+              <li key={index}>{item.drawing_title ?? item.drawing_id}: {item.reason}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {data.withheld_elements.length > 0 && (
+        <details>
+          <summary>{data.withheld_elements.length} wall(s) withheld by the height gate</summary>
+          <ul>
+            {data.withheld_elements.map((item, index) => (
+              <li key={index}>{item.element_id ?? 'unknown'}: {item.reasons.join(' ')}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+const cell: React.CSSProperties = { padding: '6px 8px', borderBottom: '1px solid #1f2d3d' };
+
+export default function ModelViewer3D({
+  projectId,
+  drawingId,
+}: {
+  projectId: string;
+  drawingId: string;
+}) {
+  const [scope, setScope] = useState<'drawing' | 'building'>('drawing');
+  return (
+    <div style={{ display: 'grid', gap: 14 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ color: '#94a3b8', fontSize: 12 }}>Show</span>
+        <button onClick={() => setScope('drawing')} style={lodButton(scope === 'drawing')}>This drawing</button>
+        <button onClick={() => setScope('building')} style={lodButton(scope === 'building')}>
+          Whole building (placed plans)
+        </button>
+      </div>
+      {scope === 'drawing'
+        ? <DrawingModelView projectId={projectId} drawingId={drawingId} />
+        : <BuildingView projectId={projectId} />}
+    </div>
+  );
 }

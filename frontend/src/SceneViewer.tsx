@@ -180,7 +180,14 @@ function useFitOrthographicToPage(width: number, height: number) {
   }, [camera, controls, size.width, size.height, width, height]);
 }
 
-export function PdfPage({ url }: { url: string }) {
+export function PdfPage({
+  url,
+  onPagePoint,
+}: {
+  url: string;
+  /** Called with PDF page coordinates (x right, y down) when the page is clicked. */
+  onPagePoint?: (x: number, y: number) => void;
+}) {
   const texture = useLoader(THREE.TextureLoader, url);
   const image = texture.image as HTMLImageElement;
   const pageWidth = image.width / PDF_PREVIEW_SCALE;
@@ -188,7 +195,14 @@ export function PdfPage({ url }: { url: string }) {
   useFitOrthographicToPage(pageWidth, pageHeight);
 
   return (
-    <mesh position={[pageWidth / 2, -pageHeight / 2, -1]} renderOrder={-1}>
+    <mesh
+      position={[pageWidth / 2, -pageHeight / 2, -1]}
+      renderOrder={-1}
+      onClick={onPagePoint ? event => {
+        event.stopPropagation();
+        onPagePoint(event.point.x, -event.point.y);
+      } : undefined}
+    >
       <planeGeometry args={[pageWidth, pageHeight]} />
       <meshBasicMaterial map={texture} toneMapped={false} />
     </mesh>

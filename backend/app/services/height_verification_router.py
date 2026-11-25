@@ -24,14 +24,15 @@ _LEDGER_LOCK = threading.Lock()
 
 
 class HeightVerificationRequest(BaseModel):
-    height_candidate_id: str = Field(min_length=1, max_length=64)
+    height_source: str = Field(default="annotation", pattern="^(annotation|storey_height)$")
+    height_candidate_id: str | None = Field(default=None, max_length=64)
     drawing_id: str = Field(min_length=1, max_length=64)
     page_number: int = Field(ge=1)
     element_ids: list[str] = Field(min_length=1, max_length=500)
     decision: str = Field(pattern="^(confirmed|rejected)$")
     reviewer: str = Field(min_length=2, max_length=120)
     justification: str = Field(min_length=20, max_length=2000)
-    cited_evidence_ids: list[str] = Field(min_length=1, max_length=200)
+    cited_evidence_ids: list[str] = Field(default_factory=list, max_length=200)
     cross_drawing_justification: str | None = Field(default=None, max_length=2000)
 
 

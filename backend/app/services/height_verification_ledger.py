@@ -44,7 +44,8 @@ from app.services.wall_height_evidence_association import (
 
 
 STAGE = "5.3.5"
-SCHEMA_VERSION = "0.1.0"
+SCHEMA_VERSION = "0.2.0"
+HEIGHT_SOURCES = {"annotation", "storey_height"}
 
 LEDGER_ARTIFACT_NAME = "height_verifications_stage5_3_5.json"
 RECOGNITION_ARTIFACT_NAME = "engineering_element_candidates_stage5_1_6.json"
@@ -253,6 +254,7 @@ def empty_ledger(project_id: str) -> dict[str, Any]:
         "updated_at": now,
         "policy": LEDGER_POLICY,
         "verifications": [],
+        "plan_placements": [],
     }
 
 
@@ -264,6 +266,8 @@ def _check_ledger(ledger: Any, project_id: str) -> list[dict[str, Any]]:
     records = ledger.get("verifications")
     if not isinstance(records, list):
         raise ValueError("Ledger verifications must be a list")
+    if not isinstance(ledger.setdefault("plan_placements", []), list):
+        raise ValueError("Ledger plan_placements must be a list")
     return records
 
 
@@ -289,6 +293,16 @@ def resolve_builder_height_evidence(
     record = active_verifications_by_element(ledger).get(element_id)
     if not record or record.get("decision") != "confirmed":
         return None
+    candidate = record.get("height_candidate") or {}
+    if candidate.get("source") == "storey_height":
+        # A storey height is only valid while its plan placement is unchanged.
+        placement = placement_by_id(ledger, candidate.get("placement_id"))
+        if (
+            not placement
+            or placement.get("status") != "active"
+            or placement.get("storey_height_mm") != candidate.get("height_mm")
+        ):
+            return None
     evidence = record.get("builder_height_evidence")
     return dict(evidence) if isinstance(evidence, dict) else None
 
@@ -398,6 +412,7 @@ def list_page_wall_candidates(
             ),
         })
 
+    placement = find_active_placement(ledger, drawing_id, page_number)
     shared = _shared_line_conflicts([c["element_id"] for c in candidates])
     for candidate in candidates:
         candidate["shares_source_line_with"] = shared.get(candidate["element_id"], [])
@@ -423,6 +438,25 @@ def list_page_wall_candidates(
             "unverified": len(candidates) - confirmed - rejected,
         },
         "candidates": candidates,
+        "placement": placement,
+        "storey_height_option": (
+            {
+                "available": True,
+                "placement_id": placement["placement_id"],
+                "height_mm": placement["storey_height_mm"],
+                "base_level_key": placement["base_level"]["level_key"],
+                "top_level_key": placement["top_level"]["level_key"],
+                "evidence": placement.get("level_evidence", []),
+            }
+            if placement and placement.get("storey_height_mm") is not None
+            else {
+                "available": False,
+                "reason": (
+                    "Set this page's base and top levels (calibration section) to confirm full-height walls."
+                    if not placement else "This page's placement has no top level."
+                ),
+            }
+        ),
         "verifications_on_page": [
             record for record in ledger.get("verifications", [])
             if record.get("drawing_id") == drawing_id
@@ -440,6 +474,118 @@ def list_page_wall_candidates(
 # ---------------------------------------------------------------------------
 # Create / revoke
 # ---------------------------------------------------------------------------
+
+def _evidence_view(reference: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "evidence_id": reference.get("evidence_id"),
+        "drawing_id": reference.get("drawing_id"),
+        "drawing_title": reference.get("drawing_title"),
+        "page_number": reference.get("page_number"),
+        "text": reference.get("text"),
+        "span_index": reference.get("span_index"),
+        "bbox_pdf_points": reference.get("bbox_pdf_points"),
+        "source_sha256": reference.get("source_sha256"),
+    }
+
+
+def _annotation_height(
+    height_report: dict[str, Any], request: dict[str, Any], decision: str,
+    drawing_id: str, page_number: int,
+) -> dict[str, Any]:
+    """Height from a Stage 5.3.4 wall-type annotation (e.g. PARAPET 1.2M HIGH)."""
+    candidate_id = request.get("height_candidate_id")
+    matches = [
+        c for c in height_report.get("wall_type_height_candidates", [])
+        if isinstance(c, dict) and c.get("candidate_id") == candidate_id
+    ]
+    if len(matches) != 1:
+        raise ValueError("Height candidate not found in the Stage 5.3.4 report")
+    height_candidate = matches[0]
+    height_mm = height_candidate.get("height_mm")
+    if decision == "confirmed":
+        if height_mm is None:
+            raise ValueError("A height range cannot be confirmed as a single wall height")
+        if not isinstance(height_mm, (int, float)) or height_mm <= 0:
+            raise ValueError("Height candidate value is invalid")
+
+    cited_ids = request.get("cited_evidence_ids")
+    if not isinstance(cited_ids, list) or not cited_ids:
+        raise ValueError("At least one cited evidence ID is required")
+    if len(set(cited_ids)) != len(cited_ids):
+        raise ValueError("Cited evidence IDs must be unique")
+    allowed = set(height_candidate.get("source_evidence_ids", []))
+    unknown = [e for e in cited_ids if e not in allowed]
+    if unknown:
+        raise ValueError(f"Cited evidence does not belong to this height candidate: {unknown[:5]}")
+
+    occurrences = {
+        item.get("evidence_id"): item
+        for item in height_report.get("component_heights", [])
+        if isinstance(item, dict)
+    }
+    cited = []
+    for evidence_id in cited_ids:
+        item = occurrences.get(evidence_id)
+        if not item:
+            raise ValueError(f"Cited evidence {evidence_id} is missing from the report")
+        cited.append(_evidence_view({
+            **(item.get("source_reference") or {}),
+            "evidence_id": evidence_id,
+            "drawing_id": item.get("drawing_id"),
+            "drawing_title": item.get("drawing_title"),
+            "page_number": item.get("page_number"),
+            "text": item.get("text"),
+        }))
+
+    return {
+        "height_mm": height_mm,
+        "cited": cited,
+        "same_drawing": any(
+            c["drawing_id"] == drawing_id and c["page_number"] == page_number for c in cited
+        ),
+        "component": " ".join(w.lower() for w in height_candidate.get("component_words", [])) or "wall",
+        "candidate": {
+            "source": "annotation",
+            "candidate_id": candidate_id,
+            "component_words": height_candidate.get("component_words", []),
+            "height_mm": height_mm,
+            "height_range_mm": height_candidate.get("height_range_mm"),
+            "printed_measurements": height_candidate.get("printed_measurements", []),
+        },
+    }
+
+
+def _storey_height(ledger: dict[str, Any], drawing_id: str, page_number: int) -> dict[str, Any]:
+    """Full storey height (top level - base level) from this page's active placement."""
+    placement = find_active_placement(ledger, drawing_id, page_number)
+    if placement is None:
+        raise ValueError(
+            "This page has no plan placement. Set its base and top levels in the "
+            "calibration section before confirming full-height walls."
+        )
+    if placement.get("storey_height_mm") is None:
+        raise ValueError(
+            "This page's placement has no top level, so its storey height is unknown."
+        )
+    base, top = placement["base_level"], placement["top_level"]
+    return {
+        "height_mm": placement["storey_height_mm"],
+        "cited": list(placement.get("level_evidence", [])),
+        "same_drawing": bool(placement.get("levels_on_this_drawing")),
+        "component": "full-height wall",
+        "candidate": {
+            "source": "storey_height",
+            "candidate_id": None,
+            "placement_id": placement["placement_id"],
+            "component_words": ["FULL-HEIGHT WALL"],
+            "height_mm": placement["storey_height_mm"],
+            "height_range_mm": None,
+            "base_level_key": base["level_key"],
+            "top_level_key": top["level_key"],
+            "printed_measurements": [f"{base['level_key']} to {top['level_key']}"],
+        },
+    }
+
 
 def build_verification_record(
     *,
@@ -490,60 +636,22 @@ def build_verification_record(
     except LookupError as exc:
         raise ValueError(str(exc)) from None
 
-    # ---- height candidate --------------------------------------------------
-    candidate_id = request.get("height_candidate_id")
-    matches = [
-        c for c in height_report.get("wall_type_height_candidates", [])
-        if isinstance(c, dict) and c.get("candidate_id") == candidate_id
-    ]
-    if len(matches) != 1:
-        raise ValueError("Height candidate not found in the Stage 5.3.4 report")
-    height_candidate = matches[0]
-    height_mm = height_candidate.get("height_mm")
-    if decision == "confirmed":
-        if height_mm is None:
-            raise ValueError("A height range cannot be confirmed as a single wall height")
-        if not isinstance(height_mm, (int, float)) or height_mm <= 0:
-            raise ValueError("Height candidate value is invalid")
+    height_source = request.get("height_source") or "annotation"
+    if height_source not in HEIGHT_SOURCES:
+        raise ValueError("height_source must be 'annotation' or 'storey_height'")
 
-    # ---- cited evidence ----------------------------------------------------
-    cited_ids = request.get("cited_evidence_ids")
-    if not isinstance(cited_ids, list) or not cited_ids:
-        raise ValueError("At least one cited evidence ID is required")
-    if len(set(cited_ids)) != len(cited_ids):
-        raise ValueError("Cited evidence IDs must be unique")
-    allowed = set(height_candidate.get("source_evidence_ids", []))
-    unknown = [e for e in cited_ids if e not in allowed]
-    if unknown:
-        raise ValueError(f"Cited evidence does not belong to this height candidate: {unknown[:5]}")
+    if height_source == "annotation":
+        height = _annotation_height(height_report, request, decision, drawing_id, page_number)
+    else:
+        height = _storey_height(ledger, drawing_id, page_number)
 
-    occurrences = {
-        item.get("evidence_id"): item
-        for item in height_report.get("component_heights", [])
-        if isinstance(item, dict)
-    }
-    cited = []
-    for evidence_id in cited_ids:
-        item = occurrences.get(evidence_id)
-        if not item:
-            raise ValueError(f"Cited evidence {evidence_id} is missing from the report")
-        reference = item.get("source_reference") or {}
-        cited.append({
-            "evidence_id": evidence_id,
-            "drawing_id": item.get("drawing_id"),
-            "drawing_title": item.get("drawing_title"),
-            "page_number": item.get("page_number"),
-            "text": item.get("text"),
-            "span_index": reference.get("span_index"),
-            "bbox_pdf_points": reference.get("bbox_pdf_points"),
-            "source_sha256": reference.get("source_sha256"),
-        })
+    height_mm = height["height_mm"]
+    cited = height["cited"]
+    cited_ids = [c["evidence_id"] for c in cited]
+    same_drawing = height["same_drawing"]
 
-    same_drawing = any(
-        c["drawing_id"] == drawing_id and c["page_number"] == page_number for c in cited
-    )
     cross_justification = request.get("cross_drawing_justification")
-    if not same_drawing:
+    if not same_drawing and height_source == "annotation":
         cross_justification = _clean_text(
             cross_justification, "cross_drawing_justification",
             minimum=MIN_JUSTIFICATION_LENGTH,
@@ -626,10 +734,12 @@ def build_verification_record(
 
     # ---- record --------------------------------------------------------------
     created_at = now or _now()
-    component = " ".join(w.lower() for w in height_candidate.get("component_words", [])) or "wall"
+    height_candidate = height["candidate"]
+    component = height["component"]
     verification_id = _stable_id([
         project_id, drawing_id, page_number, sorted(element_ids),
-        candidate_id, decision, created_at, len(records),
+        height_candidate.get("candidate_id") or height_candidate.get("placement_id"),
+        decision, created_at, len(records),
     ])
     printed = ", ".join(height_candidate.get("printed_measurements", [])) or str(height_mm)
 
@@ -663,13 +773,7 @@ def build_verification_record(
         "source_pdf_sha256": drawing.get("source_sha256"),
         "element_ids": list(element_ids),
         "element_geometry_validation": validation_statuses,
-        "height_candidate": {
-            "candidate_id": candidate_id,
-            "component_words": height_candidate.get("component_words", []),
-            "height_mm": height_mm,
-            "height_range_mm": height_candidate.get("height_range_mm"),
-            "printed_measurements": height_candidate.get("printed_measurements", []),
-        },
+        "height_candidate": height_candidate,
         "height_report": {
             "stage": HEIGHT_ASSOCIATION_STAGE,
             "artifact_sha256": height_report_sha256,
@@ -842,3 +946,259 @@ def screen_mesh_elements(
         else:
             served.append(element)
     return served, withheld
+
+
+# ---------------------------------------------------------------------------
+# Plan placements (Stage 5.4): which level a plan sits at, its storey height,
+# and the shared reference point used to stack plans into one building.
+# ---------------------------------------------------------------------------
+
+LEVEL_EVIDENCE_CAP = 10
+
+
+def placement_by_id(ledger: dict[str, Any], placement_id: Any) -> dict[str, Any] | None:
+    for placement in ledger.get("plan_placements", []):
+        if isinstance(placement, dict) and placement.get("placement_id") == placement_id:
+            return placement
+    return None
+
+
+def find_active_placement(ledger: dict[str, Any], drawing_id: str, page_number: int) -> dict[str, Any] | None:
+    for placement in ledger.get("plan_placements", []):
+        if (
+            isinstance(placement, dict)
+            and placement.get("status") == "active"
+            and placement.get("drawing_id") == drawing_id
+            and placement.get("page_number") == page_number
+        ):
+            return placement
+    return None
+
+
+def _page_size_pdf(page: dict[str, Any]) -> tuple[float, float] | None:
+    value = page.get("page_size_pdf_points")
+    try:
+        if isinstance(value, dict):
+            return float(value["width"]), float(value["height"])
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return float(value[0]), float(value[1])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _level_register(height_report: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(height_report, dict):
+        return {}
+    return {
+        level["level_key"]: level
+        for level in height_report.get("level_register", [])
+        if isinstance(level, dict) and level.get("level_key")
+    }
+
+
+def _occurrences_on_page(level: dict[str, Any], drawing_id: str, page_number: int) -> int:
+    for drawing in level.get("drawings", []):
+        pages = drawing.get("page_numbers") or [page_number]
+        if drawing.get("drawing_id") == drawing_id and page_number in pages:
+            return int(drawing.get("occurrence_count") or 0)
+    return 0
+
+
+def _level_evidence(level: dict[str, Any], drawing_id: str, page_number: int) -> list[dict[str, Any]]:
+    references = [r for r in level.get("source_references", []) if isinstance(r, dict)]
+    local = [r for r in references if r.get("drawing_id") == drawing_id and r.get("page_number") == page_number]
+    chosen = (local or references)[:LEVEL_EVIDENCE_CAP]
+    return [_evidence_view(r) for r in chosen]
+
+
+def _level_summary(level: dict[str, Any], drawing_id: str, page_number: int) -> dict[str, Any]:
+    return {
+        "level_key": level["level_key"],
+        "label": level.get("label"),
+        "standard_meaning": level.get("standard_meaning"),
+        "elevation_mm": level.get("elevation_mm"),
+        "printed_forms": level.get("printed_forms", []),
+        "occurrence_count": level.get("occurrence_count"),
+        "occurrences_on_this_drawing": _occurrences_on_page(level, drawing_id, page_number),
+    }
+
+
+def placement_options(
+    *, height_report: dict[str, Any] | None, ledger: dict[str, Any],
+    drawing_id: str, page_number: int,
+) -> dict[str, Any]:
+    """Levels a reviewer can choose from, with a suggestion that is never auto-applied."""
+    register = _level_register(height_report)
+    levels = sorted(
+        (_level_summary(level, drawing_id, page_number) for level in register.values()),
+        key=lambda item: (item["label"] or "", item["elevation_mm"] or 0),
+    )
+
+    local = [level for level in levels if level["occurrences_on_this_drawing"] > 0]
+    preference = {"SSL": 0, "FFL": 1}
+    suggested_base = min(
+        local,
+        key=lambda l: (preference.get(l["label"], 2), -l["occurrences_on_this_drawing"], l["elevation_mm"]),
+        default=None,
+    )
+    suggested_top = None
+    if suggested_base:
+        higher = [
+            l for l in levels
+            if l["label"] == suggested_base["label"] and l["elevation_mm"] > suggested_base["elevation_mm"]
+        ]
+        suggested_top = min(higher, key=lambda l: l["elevation_mm"], default=None)
+
+    return {
+        "height_report_available": bool(register),
+        "levels": levels,
+        "suggested_base_level_key": suggested_base["level_key"] if suggested_base else None,
+        "suggested_top_level_key": suggested_top["level_key"] if suggested_top else None,
+        "suggestion_basis": (
+            "Most-annotated slab level on this drawing, and the next level of the same type above it. "
+            "A suggestion only; the reviewer must confirm."
+        ),
+        "active_placement": find_active_placement(ledger, drawing_id, page_number),
+        "placements_on_page": [
+            p for p in ledger.get("plan_placements", [])
+            if p.get("drawing_id") == drawing_id and p.get("page_number") == page_number
+        ],
+    }
+
+
+def build_placement_record(
+    *,
+    ledger: dict[str, Any],
+    recognition_report: dict[str, Any],
+    height_report: dict[str, Any],
+    request: dict[str, Any],
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Validate a reviewer's plan placement and return a new ledger record."""
+    project_id = recognition_report.get("project_id")
+    _check_ledger(ledger, project_id)
+    if not isinstance(height_report, dict) or height_report.get("project_id") != project_id:
+        raise ValueError("A Stage 5.3.4 height association report for this project is required")
+    if not isinstance(request, dict):
+        raise ValueError("Request must be an object")
+
+    reviewer = _clean_text(request.get("reviewer"), "reviewer", minimum=2, maximum=120)
+    justification = _clean_text(request.get("justification"), "justification", minimum=MIN_JUSTIFICATION_LENGTH)
+    reference_label = _clean_text(request.get("reference_label"), "reference_label", minimum=2, maximum=120)
+
+    drawing_id = request.get("drawing_id")
+    try:
+        page_number = int(request.get("page_number"))
+    except (TypeError, ValueError):
+        raise ValueError("page_number must be an integer") from None
+    try:
+        drawing, page = _find_recognition_page(recognition_report, drawing_id, page_number)
+    except LookupError as exc:
+        raise ValueError(str(exc)) from None
+
+    point = request.get("reference_point_pdf")
+    if not isinstance(point, (list, tuple)) or len(point) != 2:
+        raise ValueError("reference_point_pdf must be [x, y]")
+    try:
+        rx, ry = float(point[0]), float(point[1])
+    except (TypeError, ValueError):
+        raise ValueError("reference_point_pdf must contain numbers") from None
+    size = _page_size_pdf(page)
+    if size is None or not (0 <= rx <= size[0] and 0 <= ry <= size[1]):
+        raise ValueError("Reference point lies outside the page")
+
+    register = _level_register(height_report)
+    base = register.get(request.get("base_level_key"))
+    if base is None:
+        raise ValueError("Base level not found in the Stage 5.3.4 level register")
+    top = None
+    if request.get("top_level_key"):
+        top = register.get(request.get("top_level_key"))
+        if top is None:
+            raise ValueError("Top level not found in the Stage 5.3.4 level register")
+        if top.get("label") != base.get("label"):
+            raise ValueError(
+                "Base and top levels must be the same type (e.g. SSL to SSL) so the "
+                "storey height does not mix slab and finish levels"
+            )
+        if float(top["elevation_mm"]) <= float(base["elevation_mm"]):
+            raise ValueError("Top level must be above the base level")
+
+    base_local = _occurrences_on_page(base, drawing_id, page_number) > 0
+    cross_justification = request.get("cross_drawing_justification")
+    if not base_local:
+        cross_justification = _clean_text(
+            cross_justification, "cross_drawing_justification", minimum=MIN_JUSTIFICATION_LENGTH,
+        )
+    elif cross_justification is not None:
+        cross_justification = _clean_text(cross_justification, "cross_drawing_justification", minimum=0) or None
+
+    existing = find_active_placement(ledger, drawing_id, page_number)
+    if existing:
+        raise VerificationConflict(
+            f"This page already has an active placement ({existing['placement_id']}); revoke it first."
+        )
+
+    created_at = now or _now()
+    placement_id = _stable_id([
+        project_id, drawing_id, page_number, base["level_key"], top and top["level_key"],
+        rx, ry, created_at, len(ledger.get("plan_placements", [])),
+    ])
+    evidence = _level_evidence(base, drawing_id, page_number)
+    if top:
+        evidence += _level_evidence(top, drawing_id, page_number)
+    snapped = request.get("reference_snapped_line")
+
+    return {
+        "placement_id": placement_id,
+        "stage": "5.4",
+        "created_at": created_at,
+        "status": "active",
+        "reviewer": reviewer,
+        "justification": justification,
+        "cross_drawing_justification": cross_justification,
+        "project_id": project_id,
+        "drawing_id": drawing_id,
+        "drawing_title": drawing.get("filename"),
+        "page_number": page_number,
+        "source_pdf_sha256": drawing.get("source_sha256"),
+        "base_level": _level_summary(base, drawing_id, page_number),
+        "top_level": _level_summary(top, drawing_id, page_number) if top else None,
+        "storey_height_mm": (
+            round(float(top["elevation_mm"]) - float(base["elevation_mm"]), 3) if top else None
+        ),
+        "reference_point": {
+            "point_pdf": [rx, ry],
+            "label": reference_label,
+            "snapped_line": snapped if isinstance(snapped, dict) else None,
+        },
+        "level_evidence": evidence,
+        "levels_on_this_drawing": base_local,
+        "alignment": "translation_only_plans_assumed_to_share_orientation",
+        "revocation": None,
+    }
+
+
+def apply_placement(ledger: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    ledger.setdefault("plan_placements", []).append(record)
+    ledger["updated_at"] = record["created_at"]
+    return ledger
+
+
+def revoke_placement(
+    ledger: dict[str, Any], placement_id: str, *, reviewer: Any, reason: Any, now: str | None = None,
+) -> dict[str, Any]:
+    """Mark an active placement revoked. Storey-height walls that depend on it stop being served."""
+    reviewer = _clean_text(reviewer, "reviewer", minimum=2, maximum=120)
+    reason = _clean_text(reason, "reason", minimum=MIN_JUSTIFICATION_LENGTH)
+    placement = placement_by_id(ledger, placement_id)
+    if placement is None:
+        raise LookupError("Placement not found")
+    if placement.get("status") != "active":
+        raise VerificationConflict("Placement is not active")
+    revoked_at = now or _now()
+    placement["status"] = "revoked"
+    placement["revocation"] = {"reviewer": reviewer, "reason": reason, "revoked_at": revoked_at}
+    ledger["updated_at"] = revoked_at
+    return placement

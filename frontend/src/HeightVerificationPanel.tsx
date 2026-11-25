@@ -76,9 +76,21 @@ type PageView = {
     unverified: number;
   };
   candidates: WallCandidate[];
+  storey_height_option: {
+    available: boolean;
+    reason?: string;
+    placement_id?: string;
+    height_mm?: number;
+    base_level_key?: string;
+    top_level_key?: string;
+    evidence?: { evidence_id: string; text: string; page_number: number; drawing_id: string }[];
+  };
   verifications_on_page: Verification[];
   limitations: string[];
 };
+
+/** Select value for the "full storey height" height source. */
+const STOREY = '__storey_height__';
 
 function formatDetail(detail: unknown): string {
   if (typeof detail === 'string') return detail;
@@ -215,14 +227,21 @@ export default function HeightVerificationPanel({
     () => view?.height_candidates.find(c => c.candidate_id === heightId) ?? null,
     [view, heightId],
   );
+  const storeyOption = view?.storey_height_option;
+  const storeySelected = heightId === STOREY && storeyOption?.available === true;
 
-  // Default to the confirmable height candidate best supported on this drawing.
+  // Default: an annotation height shown on this drawing (e.g. PARAPET 1.2M HIGH);
+  // otherwise the full storey height when this page has been placed.
   useEffect(() => {
     if (!view || heightId) return;
     const ranked = [...view.height_candidates]
       .filter(c => c.confirmable)
       .sort((a, b) => b.occurrences_on_this_drawing - a.occurrences_on_this_drawing);
-    if (ranked[0]) setHeightId(ranked[0].candidate_id);
+    if (ranked[0] && (ranked[0].occurrences_on_this_drawing > 0 || !view.storey_height_option?.available)) {
+      setHeightId(ranked[0].candidate_id);
+    } else if (view.storey_height_option?.available) {
+      setHeightId(STOREY);
+    }
   }, [view, heightId]);
 
   const onDrawingEvidence = heightCandidate?.evidence.filter(e => e.on_this_drawing) ?? [];
@@ -271,26 +290,30 @@ export default function HeightVerificationPanel({
   );
   const alreadyVerified = selectedList.filter(c => c.height_verification.status !== 'unverified');
 
-  const formReady =
-    selected.size > 0 &&
+  const heightReady = storeySelected || (
     heightCandidate !== null &&
     cited.size > 0 &&
+    (citesThisDrawing || crossJustification.trim().length >= MIN_TEXT)
+  );
+
+  const formReady =
+    selected.size > 0 &&
+    heightReady &&
     reviewer.trim().length >= 2 &&
     justification.trim().length >= MIN_TEXT &&
-    (citesThisDrawing || crossJustification.trim().length >= MIN_TEXT) &&
     alreadyVerified.length === 0;
 
   const canConfirm =
     formReady &&
-    heightCandidate?.confirmable === true &&
+    (storeySelected || heightCandidate?.confirmable === true) &&
     internalOverlap.length === 0 &&
     overlapConfirmed.length === 0;
 
   // Say exactly why Confirm is disabled instead of leaving a greyed-out button.
   const missing: string[] = [];
   if (selected.size === 0) missing.push('select at least one wall candidate');
-  if (!heightCandidate) missing.push('choose a height candidate');
-  else if (!heightCandidate.confirmable) missing.push('choose a single height (a range cannot be confirmed)');
+  if (!heightCandidate && !storeySelected) missing.push('choose a height');
+  else if (heightCandidate && !heightCandidate.confirmable) missing.push('choose a single height (a range cannot be confirmed)');
   if (heightCandidate && cited.size === 0) missing.push('cite at least one source annotation');
   if (reviewer.trim().length < 2) missing.push('enter your name in Reviewer name');
   if (justification.trim().length < MIN_TEXT) {
@@ -319,7 +342,7 @@ export default function HeightVerificationPanel({
   }
 
   async function submit(decision: 'confirmed' | 'rejected') {
-    if (!heightCandidate) return;
+    if (!heightCandidate && !storeySelected) return;
     setBusy(true);
     setNotice('');
     setError('');
@@ -328,15 +351,16 @@ export default function HeightVerificationPanel({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          height_candidate_id: heightCandidate.candidate_id,
+          height_source: storeySelected ? 'storey_height' : 'annotation',
+          height_candidate_id: storeySelected ? null : heightCandidate?.candidate_id,
           drawing_id: drawingId,
           page_number: PAGE_NUMBER,
           element_ids: Array.from(selected),
           decision,
           reviewer: reviewer.trim(),
           justification: justification.trim(),
-          cited_evidence_ids: Array.from(cited),
-          cross_drawing_justification: citesThisDrawing ? null : crossJustification.trim(),
+          cited_evidence_ids: storeySelected ? [] : Array.from(cited),
+          cross_drawing_justification: storeySelected || citesThisDrawing ? null : crossJustification.trim(),
         }),
       });
       setNotice(
@@ -380,9 +404,11 @@ export default function HeightVerificationPanel({
 
   const previewUrl = `${API}/projects/${projectId}/phase6/preview/${drawingId}?page_number=${PAGE_NUMBER}`;
   const hoveredCandidate = hovered ? byId.get(hovered) : undefined;
-  const heightLabel = heightCandidate
-    ? `${heightCandidate.component_words.join(' ').toLowerCase()} ${mm(heightCandidate.height_mm)}`
-    : '';
+  const heightLabel = storeySelected
+    ? `full-height ${mm(storeyOption?.height_mm)}`
+    : heightCandidate
+      ? `${heightCandidate.component_words.join(' ').toLowerCase()} ${mm(heightCandidate.height_mm)}`
+      : '';
 
   return (
     <div style={{ display: 'grid', gap: 16, color: '#cbd5e1', fontSize: 13 }}>
@@ -531,9 +557,14 @@ export default function HeightVerificationPanel({
             <strong style={{ color: '#eaf0f8' }}>Record a reviewer decision</strong>
 
             <label>
-              Height candidate (from Stage 5.3.4; component named in the annotation text)
+              Height (an annotation naming the component, or this plan's full storey height)
               <select value={heightId} onChange={e => setHeightId(e.target.value)}>
-                <option value="">Select a height candidate</option>
+                <option value="">Select a height</option>
+                <option value={STOREY} disabled={!storeyOption?.available}>
+                  {storeyOption?.available
+                    ? `Full storey height · ${mm(storeyOption.height_mm)} (${storeyOption.base_level_key} → ${storeyOption.top_level_key}) · walls slab to slab`
+                    : `Full storey height · unavailable: ${storeyOption?.reason ?? 'place this plan first'}`}
+                </option>
                 {view.height_candidates.map(candidate => (
                   <option key={candidate.candidate_id} value={candidate.candidate_id}>
                     {candidate.component_words.join(' ')} ·{' '}
@@ -546,6 +577,21 @@ export default function HeightVerificationPanel({
                 ))}
               </select>
             </label>
+
+            {storeySelected && (
+              <div style={{ display: 'grid', gap: 4, fontSize: 12 }}>
+                <span style={{ color: '#a9b8c9' }}>
+                  Cited automatically: the level annotations this plan's placement was based on
+                  ({storeyOption?.evidence?.length ?? 0}). Only confirm walls that run the full height
+                  from slab to slab.
+                </span>
+                <div style={{ display: 'grid', gap: 2, maxHeight: 100, overflow: 'auto', color: '#8fa1b5' }}>
+                  {(storeyOption?.evidence ?? []).map(e => (
+                    <span key={e.evidence_id}>“{e.text}” · p{e.page_number} · {e.evidence_id}</span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {heightCandidate && (
               <div style={{ display: 'grid', gap: 6 }}>

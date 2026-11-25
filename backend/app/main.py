@@ -43,6 +43,8 @@ from app.services.height_association_router import router as height_association_
 from app.services.height_verification_router import router as height_verification_router
 from app.services.height_verification_ledger import load_ledger, screen_mesh_elements
 from app.services.wall_mesh_generation_router import router as wall_mesh_generation_router
+from app.services.drawing_snap import router as drawing_snap_router
+from app.services.plan_placement_router import router as plan_placement_router
 
 
 
@@ -77,6 +79,8 @@ app.include_router(phase6_scene_router)
 app.include_router(height_association_router)
 app.include_router(height_verification_router)
 app.include_router(wall_mesh_generation_router)
+app.include_router(drawing_snap_router)
+app.include_router(plan_placement_router)
 
 app.add_middleware(
 
