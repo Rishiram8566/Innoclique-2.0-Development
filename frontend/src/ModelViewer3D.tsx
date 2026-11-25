@@ -41,19 +41,20 @@ type MeshResponse = {
 };
 
 const LOD_NOTES: Record<LOD, string> = {
-  '100': 'LOD 100 shows the structural frame (columns and beams). None are source-verified on this drawing yet, so only the plan is shown.',
-  '200': 'LOD 200 adds floor slabs to the frame. No slab is source-verified yet, so only the plan is shown.',
-  '300': 'LOD 300: reviewer-confirmed walls at their verified heights.',
-  '400': 'LOD 400: walls with construction edges. No construction-level details are in the verified evidence yet.',
-  '500': 'LOD 500: walls coloured by component with labels. No roof, rooms or scan data are verified yet.',
+  '100': 'LOD 100: structural frame — reviewer-confirmed columns (square outlines on grid intersections), full storey height. Beams are not on the architectural drawings, so none are shown.',
+  '200': 'LOD 200: columns plus approximate slabs at each confirmed slab level (Whole building view), outlined around the columns; slab thickness is not in the drawings.',
+  '300': 'LOD 300: adds reviewer-confirmed walls at their verified heights.',
+  '400': 'LOD 400: columns and walls with construction edges. No construction-level details are in the verified evidence yet.',
+  '500': 'LOD 500: elements coloured by component with labels. No roof, rooms or scan data are verified yet.',
 };
 
 const COMPONENT_COLORS: Record<string, string> = {
   parapet: '#e2c799',
   'full-height wall': '#c3cdd8',
+  column: '#8f99a4',
   wall: '#cfcac0',
 };
-const CONCRETE = '#c9c5bb';
+const CONCRETE = '#b3ada1';
 const SELECTED = '#f97316';
 
 function formatDetail(detail: unknown): string {
@@ -189,6 +190,9 @@ function DrawingModelView({
   const [busy, setBusy] = useState(false);
   const [lod, setLod] = useState<LOD>('300');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Frame the confirmed walls by default; the whole sheet is one click away.
+  const [frame, setFrame] = useState<'walls' | 'sheet'>('walls');
+  const [frameNonce, setFrameNonce] = useState(0);
 
   const load = useCallback(async () => {
     setStatus('loading');
@@ -242,6 +246,17 @@ function DrawingModelView({
   const selected = model?.elements.find(e => e.element_id === selectedId) ?? null;
   const sizeMm = model?.page?.size_mm ?? null;
   const previewUrl = `${API}/projects/${projectId}/phase6/preview/${drawingId}?page_number=${PAGE_NUMBER}`;
+  // With no walls visible (LOD 100/200) there is nothing to frame but the sheet.
+  const effectiveFrame = visible.length > 0 ? frame : 'sheet';
+  const ground = sizeMm ? (
+    <GroundFallback>
+      <Suspense fallback={null}>
+        <PlanGround url={previewUrl} sizeMm={sizeMm} />
+      </Suspense>
+    </GroundFallback>
+  ) : (
+    <gridHelper args={[200, 40, '#94a3b8', '#cbd5e1']} />
+  );
 
   const generateButton = (
     <button className="primary" disabled={busy} onClick={generate}>
@@ -283,6 +298,20 @@ function DrawingModelView({
             LOD {level}
           </button>
         ))}
+        <span style={{ color: '#94a3b8', fontSize: 12, marginLeft: 12 }}>Frame</span>
+        <button
+          onClick={() => { setFrame('walls'); setFrameNonce(n => n + 1); }}
+          disabled={visible.length === 0}
+          style={lodButton(effectiveFrame === 'walls')}
+        >
+          Walls
+        </button>
+        <button
+          onClick={() => { setFrame('sheet'); setFrameNonce(n => n + 1); }}
+          style={lodButton(effectiveFrame === 'sheet')}
+        >
+          Whole sheet
+        </button>
       </div>
 
       <div style={noteStyle}>{LOD_NOTES[lod]}</div>
@@ -307,17 +336,17 @@ function DrawingModelView({
             shadow-camera-far={600}
           />
           <Suspense fallback={null}>
-            <Bounds fit clip observe margin={1.15}>
+            {/* Bounds frames only what is inside it: the walls by default, or the whole sheet.
+                The key remounts it so switching target or LOD re-frames the camera. */}
+            <Bounds
+              key={`${effectiveFrame}-${frameNonce}`}
+              fit
+              clip
+              observe
+              margin={effectiveFrame === 'walls' ? 1.6 : 1.15}
+            >
               <group onPointerMissed={() => setSelectedId(null)}>
-                {sizeMm ? (
-                  <GroundFallback>
-                    <Suspense fallback={null}>
-                      <PlanGround url={previewUrl} sizeMm={sizeMm} />
-                    </Suspense>
-                  </GroundFallback>
-                ) : (
-                  <gridHelper args={[200, 40, '#94a3b8', '#cbd5e1']} />
-                )}
+                {effectiveFrame === 'sheet' && ground}
                 {visible.map(element => (
                   <Wall
                     key={element.element_id}
@@ -329,6 +358,7 @@ function DrawingModelView({
                 ))}
               </group>
             </Bounds>
+            {effectiveFrame === 'walls' && ground}
           </Suspense>
           <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.05} />
         </Canvas>
@@ -436,6 +466,14 @@ type BuildingResponse = {
     walls_withheld: number;
   }[];
   elements: BuildingElement[];
+  slabs?: {
+    element_id: string;
+    level_key: string;
+    elevation_mm: number;
+    outline_mm: number[][];
+    approximate: boolean;
+    lod: { minimum_lod: number };
+  }[];
   withheld_elements: { element_id: string | null; drawing_id: string; reasons: string[] }[];
   excluded_plans: { drawing_id: string; drawing_title: string | null; reason: string }[];
   limitations: string[];
@@ -446,9 +484,45 @@ function elevation(mmValue: number) {
   return `${sign}${Math.abs(mmValue / 1000).toFixed(2)} m`;
 }
 
+/** Approximate slab: a flat plate at the slab level (thickness not established). */
+function Slab({ outline, elevationMm }: { outline: number[][]; elevationMm: number }) {
+  const geometry = useMemo(() => {
+    const shape = new THREE.Shape(outline.map(([x, y]) => new THREE.Vector2(x / MM_PER_M, y / MM_PER_M)));
+    return new THREE.ShapeGeometry(shape);
+  }, [outline]);
+  return (
+    // Shape lies in XY; +90 degrees about X maps plan (x, y) to (x, 0, y), i.e. y "down" -> +Z.
+    <mesh geometry={geometry} rotation={[Math.PI / 2, 0, 0]} position={[0, elevationMm / MM_PER_M, 0]} receiveShadow>
+      <meshStandardMaterial color="#d6d2c8" transparent opacity={0.55} side={THREE.DoubleSide} depthWrite={false} />
+    </mesh>
+  );
+}
+
 function BuildingView({ projectId }: { projectId: string }) {
   const [data, setData] = useState<BuildingResponse | null>(null);
   const [error, setError] = useState('');
+  const [reload, setReload] = useState(0);
+  const [generating, setGenerating] = useState(false);
+  const [runReport, setRunReport] = useState<string[]>([]);
+
+  async function generateAll() {
+    setGenerating(true);
+    setRunReport([]);
+    try {
+      const response = await fetch(`${API}/projects/${projectId}/model/building/generate`, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(formatDetail(body?.detail) || `Request failed (${response.status})`);
+      setRunReport((body.plans ?? []).map((plan: { drawing_title: string; status: string; confirmed_walls?: number; confirmed_columns?: number; failed?: number; reason?: string }) =>
+        plan.status === 'generated'
+          ? `${plan.drawing_title}: ${plan.confirmed_walls ?? 0} wall(s), ${plan.confirmed_columns ?? 0} column(s) built${plan.failed ? `, ${plan.failed} failed checks` : ''}`
+          : `${plan.drawing_title}: ${plan.reason}`));
+      setReload(n => n + 1);
+    } catch (err) {
+      setRunReport([err instanceof Error ? err.message : 'Generation failed.']);
+    } finally {
+      setGenerating(false);
+    }
+  }
   const [lod, setLod] = useState<LOD>('300');
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -464,7 +538,7 @@ function BuildingView({ projectId }: { projectId: string }) {
       })
       .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load the building.'); });
     return () => { cancelled = true; };
-  }, [projectId]);
+  }, [projectId, reload]);
 
   const visible = useMemo(
     () => (data?.elements ?? []).filter(e => Number(lod) >= (e.lod?.minimum_lod ?? 300)),
@@ -480,13 +554,26 @@ function BuildingView({ projectId }: { projectId: string }) {
   if (!data) return <div className="message">Loading building model...</div>;
 
   const selected = data.elements.find(e => e.element_id === selectedId) ?? null;
+  const isColumn = (e: BuildingElement) => e.component === 'column';
+  const countFor = (placementId: string | null, columns: boolean) =>
+    data.elements.filter(e => (placementId === null || e.storey.placement_id === placementId) && isColumn(e) === columns).length;
 
   return (
     <div style={{ display: 'grid', gap: 14, color: '#cbd5e1', fontSize: 13 }}>
+      <div>
+        <button className="primary" disabled={generating || data.summary.placed_plans === 0} onClick={generateAll}>
+          {generating ? 'Generating…' : 'Generate model for all placed plans'}
+        </button>
+      </div>
+      {runReport.length > 0 && (
+        <ul style={{ margin: 0, fontSize: 12 }}>{runReport.map((line, i) => <li key={i}>{line}</li>)}</ul>
+      )}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18 }}>
         <span>Placed plans: {data.summary.placed_plans}</span>
         <span>Storeys in model: {data.summary.plans_in_model}</span>
-        <span>Walls: {data.summary.walls_served}</span>
+        <span>Walls: {countFor(null, false)}</span>
+        <span>Columns: {countFor(null, true)}</span>
+        <span>Approximate slabs: {(data.slabs ?? []).length}</span>
         <span style={{ color: data.summary.walls_withheld ? '#fbbf24' : undefined }}>
           Withheld: {data.summary.walls_withheld}
         </span>
@@ -539,6 +626,9 @@ function BuildingView({ projectId }: { projectId: string }) {
                       onSelect={setSelectedId}
                     />
                   ))}
+                  {(data.slabs ?? [])
+                    .filter(slab => Number(lod) >= slab.lod.minimum_lod)
+                    .map(slab => <Slab key={slab.element_id} outline={slab.outline_mm} elevationMm={slab.elevation_mm} />)}
                 </group>
               </Bounds>
               <gridHelper args={[300, 60, '#94a3b8', '#cbd5e1']} position={[0, groundY, 0]} />
@@ -550,14 +640,14 @@ function BuildingView({ projectId }: { projectId: string }) {
 
       <small style={{ color: '#8fa1b5' }}>
         Building metres from each plan's shared reference point; heights from the annotated levels you chose.
-        Plans are aligned by translation only (same orientation assumed). Click a wall to inspect.
+        Plans are aligned by translation only (same orientation assumed). Click a wall or column to inspect.
       </small>
 
       {data.storeys.length > 0 && (
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr>
-              {['Plan', 'Base level', 'Storey height', 'Reference point', 'Walls', 'Withheld'].map(h => (
+              {['Plan', 'Base level', 'Storey height', 'Reference point', 'Walls', 'Columns', 'Withheld'].map(h => (
                 <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: '#94a3b8', borderBottom: '1px solid #1f2d3d' }}>{h}</th>
               ))}
             </tr>
@@ -569,7 +659,8 @@ function BuildingView({ projectId }: { projectId: string }) {
                 <td style={cell}>{storey.base_level_key} ({elevation(storey.base_elevation_mm)})</td>
                 <td style={cell}>{storey.storey_height_mm ? mm(storey.storey_height_mm) : '—'}</td>
                 <td style={cell}>{storey.reference_label}</td>
-                <td style={cell}>{storey.walls_served}</td>
+                <td style={cell}>{countFor(storey.placement_id, false)}</td>
+                <td style={cell}>{countFor(storey.placement_id, true)}</td>
                 <td style={cell}>{storey.walls_withheld}</td>
               </tr>
             ))}

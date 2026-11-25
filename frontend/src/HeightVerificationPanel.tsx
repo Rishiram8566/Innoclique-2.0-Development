@@ -15,6 +15,8 @@ type WallCandidate = {
   candidate_index: number;
   element_type: string;
   recognition_source?: string;
+  suggested?: boolean;
+  suggestion_note?: string | null;
   bbox_pdf_points: number[];
   length_pdf_points: number | null;
   thickness_pdf_points: number | null;
@@ -78,6 +80,12 @@ type PageView = {
     unverified: number;
   };
   candidates: WallCandidate[];
+  suggestions?: {
+    suggested: number;
+    skipped_as_dense_linework: number;
+    typical_wall_thickness_mm: number | null;
+    rules: string[];
+  };
   storey_height_option: {
     available: boolean;
     reason?: string;
@@ -531,12 +539,23 @@ export default function HeightVerificationPanel({
           </div>
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', fontSize: 12 }}>
+            <button
+              disabled={busy || !view.suggestions?.suggested}
+              onClick={() => setSelected(new Set(view.candidates.filter(c => c.suggested).map(c => c.element_id)))}
+              style={secondaryButtonStyle(busy || !view.suggestions?.suggested)}
+              title={(view.suggestions?.rules ?? []).join(' ')}
+            >
+              Select suggested walls ★ ({view.suggestions?.suggested ?? 0})
+            </button>
             <button disabled={busy} onClick={findMoreWalls} style={secondaryButtonStyle(busy)}>
               {busy ? 'Working…' : 'Find more walls on this drawing'}
             </button>
             <span style={{ color: '#8fa1b5' }}>
-              Re-runs recognition with separate horizontal and vertical budgets and adds only new pairs
-              (marked “new”). “Unclassified pair” means two parallel lines with no wall label nearby —
+              ★ Suggested: one pair per small group, closest to the
+              {view.suggestions?.typical_wall_thickness_mm ? ` ${view.suggestions.typical_wall_thickness_mm} mm` : ''} wall
+              stated on this sheet; {view.suggestions?.skipped_as_dense_linework ?? 0} pairs skipped as dense
+              linework. Review the selection on the drawing before confirming. “Find more walls” re-runs
+              recognition and adds only new pairs (marked “new”). “Unclassified pair” means two parallel lines with no wall label nearby —
               confirm one only if the drawing shows a wall there.
             </span>
           </div>
@@ -575,6 +594,7 @@ export default function HeightVerificationPanel({
                       </td>
                       <td style={cellStyle()}>{candidate.candidate_index}</td>
                       <td style={cellStyle()} title={candidate.element_type}>
+                        {candidate.suggested && <span style={{ color: '#b7f36b' }}>★ </span>}
                         {candidate.element_type.startsWith('unclassified') ? 'unclassified pair' : 'wall'}
                         {candidate.recognition_source === 'stage5_1_8_supplement' && (
                           <span style={{ color: '#38bdf8' }}> · new</span>

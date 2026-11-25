@@ -258,6 +258,7 @@ def empty_ledger(project_id: str) -> dict[str, Any]:
         "policy": LEDGER_POLICY,
         "verifications": [],
         "plan_placements": [],
+        "column_confirmations": [],
     }
 
 
@@ -271,6 +272,8 @@ def _check_ledger(ledger: Any, project_id: str) -> list[dict[str, Any]]:
         raise ValueError("Ledger verifications must be a list")
     if not isinstance(ledger.setdefault("plan_placements", []), list):
         raise ValueError("Ledger plan_placements must be a list")
+    if not isinstance(ledger.setdefault("column_confirmations", []), list):
+        raise ValueError("Ledger column_confirmations must be a list")
     return records
 
 
@@ -364,6 +367,7 @@ def list_page_wall_candidates(
     height_report: dict[str, Any] | None = None,
     validation_report: dict[str, Any] | None = None,
     calibration_report: dict[str, Any] | None = None,
+    typical_wall_thickness_mm: float | None = None,
 ) -> dict[str, Any]:
     """Everything a reviewer needs to decide on one drawing page."""
 
@@ -420,6 +424,7 @@ def list_page_wall_candidates(
     shared = _shared_line_conflicts([c["element_id"] for c in candidates])
     for candidate in candidates:
         candidate["shares_source_line_with"] = shared.get(candidate["element_id"], [])
+    suggestions = suggest_walls(candidates, typical_wall_thickness_mm)
 
     confirmed = sum(1 for c in candidates if c["height_verification"]["status"] == "confirmed")
     rejected = sum(1 for c in candidates if c["height_verification"]["status"] == "rejected")
@@ -442,6 +447,7 @@ def list_page_wall_candidates(
             "unverified": len(candidates) - confirmed - rejected,
         },
         "candidates": candidates,
+        "suggestions": suggestions,
         "placement": placement,
         "storey_height_option": (
             {
@@ -926,6 +932,19 @@ def screen_mesh_elements(
         element_id = str(element.get("element_id") or "")
         reasons = []
 
+        if element.get("element_type") == "column":
+            height = resolve_column_height(ledger, element_id)
+            mesh_height = (element.get("dimensions_mm") or {}).get("height")
+            if height is None:
+                reasons.append("No active column confirmation with an unchanged plan placement.")
+            elif mesh_height is None or abs(float(mesh_height) - height) > 1e-6:
+                reasons.append(f"Column height {mesh_height} differs from the confirmed storey height {height}.")
+            if reasons:
+                withheld.append({"element_id": element_id or None, "reasons": reasons})
+            else:
+                served.append(element)
+            continue
+
         height_status = str(element.get("height_status") or "")
         if "assumed" in height_status.lower() or "test" in height_status.lower():
             reasons.append(f"Height status is '{height_status}', not drawing-derived.")
@@ -1176,6 +1195,9 @@ def build_placement_record(
             "point_pdf": [rx, ry],
             "label": reference_label,
             "snapped_line": snapped if isinstance(snapped, dict) else None,
+            "transferred_from": (
+                request.get("reference_transfer") if isinstance(request.get("reference_transfer"), dict) else None
+            ),
         },
         "level_evidence": evidence,
         "levels_on_this_drawing": base_local,
@@ -1206,3 +1228,198 @@ def revoke_placement(
     placement["revocation"] = {"reviewer": reviewer, "reason": reason, "revoked_at": revoked_at}
     ledger["updated_at"] = revoked_at
     return placement
+
+
+# ---------------------------------------------------------------------------
+# Wall suggestions: a starting selection for the reviewer, never a decision.
+# ---------------------------------------------------------------------------
+
+SUGGEST_MAX_CLUSTER = 3
+SUGGEST_MIN_LENGTH_MM = 600.0
+SUGGEST_THICKNESS_TOLERANCE = 0.5
+SUGGEST_MAX_THICKNESS_MM = 600.0
+
+
+def suggest_walls(candidates: list[dict[str, Any]], typical_wall_thickness_mm: float | None) -> dict[str, Any]:
+    """
+    Mark at most one candidate per small group of overlapping pairs as suggested.
+
+    Groups of more than SUGGEST_MAX_CLUSTER overlapping pairs are skipped as
+    dense repeated linework (hatching, louvres). Within a group the pair
+    closest to the wall thickness stated on the sheet is chosen (or the
+    thickest plausible pair when no thickness is stated). Pairs shorter than
+    SUGGEST_MIN_LENGTH_MM, unvalidated pairs and uncalibrated pages get no
+    suggestion. The reviewer still selects and confirms.
+    """
+    by_id = {c["element_id"]: c for c in candidates}
+    parent = {element_id: element_id for element_id in by_id}
+
+    def find(item: str) -> str:
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    for candidate in candidates:
+        candidate["suggested"] = False
+        candidate["suggestion_note"] = None
+        for other in candidate.get("shares_source_line_with", []):
+            if other in parent:
+                parent[find(other)] = find(candidate["element_id"])
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for element_id, candidate in by_id.items():
+        groups.setdefault(find(element_id), []).append(candidate)
+
+    suggested = 0
+    skipped_dense = 0
+    for members in groups.values():
+        if len(members) > SUGGEST_MAX_CLUSTER:
+            skipped_dense += len(members)
+            for member in members:
+                member["suggestion_note"] = f"one of {len(members)} overlapping pairs (dense linework)"
+            continue
+        if any(m["height_verification"]["status"] != "unverified" for m in members):
+            continue
+        eligible = [
+            m for m in members
+            if m["geometry_validation_status"] in ("geometry_validated", "validation_report_not_available")
+            and m.get("thickness_mm_provisional") and m.get("length_mm_provisional")
+            and m["length_mm_provisional"] >= SUGGEST_MIN_LENGTH_MM
+        ]
+        if typical_wall_thickness_mm:
+            eligible = [
+                m for m in eligible
+                if abs(m["thickness_mm_provisional"] - typical_wall_thickness_mm)
+                <= SUGGEST_THICKNESS_TOLERANCE * typical_wall_thickness_mm
+            ]
+            best = min(eligible, key=lambda m: abs(m["thickness_mm_provisional"] - typical_wall_thickness_mm), default=None)
+        else:
+            eligible = [m for m in eligible if m["thickness_mm_provisional"] <= SUGGEST_MAX_THICKNESS_MM]
+            best = max(eligible, key=lambda m: m["thickness_mm_provisional"], default=None)
+        if best:
+            best["suggested"] = True
+            best["suggestion_note"] = (
+                f"closest to the {typical_wall_thickness_mm:g} mm wall stated on this sheet"
+                if typical_wall_thickness_mm else "thickest plausible pair in its group"
+            )
+            suggested += 1
+
+    return {
+        "suggested": suggested,
+        "skipped_as_dense_linework": skipped_dense,
+        "typical_wall_thickness_mm": typical_wall_thickness_mm,
+        "rules": [
+            f"Groups of more than {SUGGEST_MAX_CLUSTER} overlapping pairs are skipped as dense linework.",
+            f"Pairs shorter than {SUGGEST_MIN_LENGTH_MM:g} mm or without validated geometry are skipped.",
+            "One pair per group: closest to the sheet's stated wall thickness (within 50%).",
+            "Suggestions need a calibrated page and are never confirmed automatically.",
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Column confirmations (LOD 100): columns run the full storey height.
+# ---------------------------------------------------------------------------
+
+def active_column_confirmations(ledger: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for record in ledger.get("column_confirmations", []):
+        if isinstance(record, dict) and record.get("status") == "active":
+            for column_id in record.get("column_ids", []):
+                result[column_id] = record
+    return result
+
+
+def resolve_column_height(ledger: dict[str, Any], column_id: str) -> float | None:
+    """Storey height for a confirmed column while its placement is unchanged, else None."""
+    record = active_column_confirmations(ledger).get(column_id)
+    if not record:
+        return None
+    placement = placement_by_id(ledger, record.get("placement_id"))
+    if (
+        not placement
+        or placement.get("status") != "active"
+        or placement.get("storey_height_mm") != record.get("height_mm")
+    ):
+        return None
+    return float(record["height_mm"])
+
+
+def build_column_confirmation(
+    *, ledger: dict[str, Any], project_id: str, request: dict[str, Any],
+    page_candidates: list[dict[str, Any]], now: str | None = None,
+) -> dict[str, Any]:
+    """Validate a reviewer's column confirmation against the page's detected candidates."""
+    _check_ledger(ledger, project_id)
+    reviewer = _clean_text(request.get("reviewer"), "reviewer", minimum=2, maximum=120)
+    justification = _clean_text(request.get("justification"), "justification", minimum=MIN_JUSTIFICATION_LENGTH)
+    drawing_id = request.get("drawing_id")
+    try:
+        page_number = int(request.get("page_number"))
+    except (TypeError, ValueError):
+        raise ValueError("page_number must be an integer") from None
+
+    placement = find_active_placement(ledger, drawing_id, page_number)
+    if placement is None or placement.get("storey_height_mm") is None:
+        raise ValueError("Place this page with a base and top level first; columns take the storey height.")
+
+    column_ids = request.get("column_ids")
+    if not isinstance(column_ids, list) or not column_ids:
+        raise ValueError("At least one column_id is required")
+    if len(set(column_ids)) != len(column_ids):
+        raise ValueError("column_ids must be unique")
+    known = {c["column_id"]: c for c in page_candidates}
+    missing = [c for c in column_ids if c not in known]
+    if missing:
+        raise ValueError(f"Not a detected column on this page: {missing[:5]}")
+    active = active_column_confirmations(ledger)
+    clashes = sorted({active[c]["confirmation_id"] for c in column_ids if c in active})
+    if clashes:
+        raise VerificationConflict(f"Some columns are already confirmed; revoke first: {clashes}")
+
+    created_at = now or _now()
+    confirmation_id = _stable_id([project_id, drawing_id, page_number, sorted(column_ids), created_at,
+                                  len(ledger.get("column_confirmations", []))])
+    return {
+        "confirmation_id": confirmation_id,
+        "stage": "5.4",
+        "created_at": created_at,
+        "status": "active",
+        "reviewer": reviewer,
+        "justification": justification,
+        "project_id": project_id,
+        "drawing_id": drawing_id,
+        "drawing_title": placement.get("drawing_title"),
+        "page_number": page_number,
+        "column_ids": list(column_ids),
+        "grid_labels": [known[c].get("grid_label") for c in column_ids],
+        "placement_id": placement["placement_id"],
+        "height_mm": placement["storey_height_mm"],
+        "height_basis": f"{placement['base_level']['level_key']} to {placement['top_level']['level_key']}",
+        "revocation": None,
+    }
+
+
+def apply_column_confirmation(ledger: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    ledger.setdefault("column_confirmations", []).append(record)
+    ledger["updated_at"] = record["created_at"]
+    return ledger
+
+
+def revoke_column_confirmation(
+    ledger: dict[str, Any], confirmation_id: str, *, reviewer: Any, reason: Any, now: str | None = None,
+) -> dict[str, Any]:
+    reviewer = _clean_text(reviewer, "reviewer", minimum=2, maximum=120)
+    reason = _clean_text(reason, "reason", minimum=MIN_JUSTIFICATION_LENGTH)
+    matches = [r for r in ledger.get("column_confirmations", []) if r.get("confirmation_id") == confirmation_id]
+    if len(matches) != 1:
+        raise LookupError("Column confirmation not found")
+    record = matches[0]
+    if record.get("status") != "active":
+        raise VerificationConflict("Column confirmation is not active")
+    revoked_at = now or _now()
+    record["status"] = "revoked"
+    record["revocation"] = {"reviewer": reviewer, "reason": reason, "revoked_at": revoked_at}
+    ledger["updated_at"] = revoked_at
+    return record

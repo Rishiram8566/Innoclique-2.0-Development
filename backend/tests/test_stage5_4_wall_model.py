@@ -133,7 +133,7 @@ def served_meshes():
 def test_confirmed_wall_becomes_served_metric_mesh(project):
     record = confirm(project, [element(1, 2)])
     result = router_module.generate_verified_wall_model(PROJECT, drawing_id=DRAWING, page_number=1)
-    assert result["summary"] == {"confirmed_walls": 1, "meshes_built": 1, "failed": 0}
+    assert result["summary"] == {"confirmed_walls": 1, "confirmed_columns": 0, "meshes_built": 1, "failed": 0}
 
     artifact = json.loads((project / "artifacts" / "mesh_batches" / f"{DRAWING}_stage5_4.json").read_text("utf-8"))
     mesh = artifact["elements"][0]

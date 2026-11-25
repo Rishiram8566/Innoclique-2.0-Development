@@ -150,7 +150,8 @@ def test_placement_records_storey_height_and_level_evidence(project):
     assert record["storey_height_mm"] == 4200.0
     assert record["levels_on_this_drawing"] is True
     assert {e["evidence_id"] for e in record["level_evidence"]} >= {"ev-22-0", "ev-22-1"}
-    assert record["reference_point"] == {"point_pdf": [100.0, 100.0], "label": "Grid A/1", "snapped_line": None}
+    assert record["reference_point"] == {"point_pdf": [100.0, 100.0], "label": "Grid A/1",
+                                         "snapped_line": None, "transferred_from": None}
 
 
 @pytest.mark.parametrize("base,top,point,match", [
@@ -270,6 +271,8 @@ def test_unplaced_and_recalibrated_plans_are_excluded(project):
     reasons = {e["drawing_id"]: e["reason"] for e in model["excluded_plans"]}
     assert "calibration changed" in reasons[LOWER]
     assert "no placement" in reasons[UPPER]
+    titles = {e["drawing_id"]: e["drawing_title"] for e in model["excluded_plans"]}
+    assert titles[UPPER] == "BASEMENT UPPER.pdf"
 
 
 # ------------------------------------------------------------------- router

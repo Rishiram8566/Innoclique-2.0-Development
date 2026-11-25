@@ -28,6 +28,7 @@ from typing import Any
 
 from app.services import bim_geometry_builder as wall_builder
 from app.services import height_verification_ledger as ledger_service
+from app.services import column_detection as columns_module
 from app.services.recognition_supplement import read_recognition
 
 
@@ -130,6 +131,7 @@ def build_verified_wall_model(
     drawing_id: str,
     page_number: int,
     source_line_loader,
+    column_loader=None,
 ) -> dict[str, Any]:
     """
     Build the Stage 5.4 artifact for one page.
@@ -171,10 +173,14 @@ def build_verified_wall_model(
             and record.get("page_number") == page_number
         ):
             confirmed.append((element_id, record))
-    if not confirmed:
+    confirmed_columns = [
+        column_id for column_id, record in ledger_service.active_column_confirmations(ledger).items()
+        if record.get("drawing_id") == drawing_id and record.get("page_number") == page_number
+    ]
+    if not confirmed and not confirmed_columns:
         raise GenerationBlocked(
-            "No reviewer-confirmed walls on this page yet. Confirm walls in "
-            "Stage 5.3.5 height verification first."
+            "No reviewer-confirmed walls or columns on this page yet. Confirm walls in "
+            "Stage 5.3.5 height verification (or columns) first."
         )
 
     candidates: dict[str, dict[str, Any]] = {}
@@ -191,7 +197,9 @@ def build_verified_wall_model(
         wanted.update(lines)
 
     source_sha = drawing.get("source_sha256")
-    lines_by_key, sidecar_provenance = source_line_loader(wanted, source_sha)
+    lines_by_key, sidecar_provenance = (
+        source_line_loader(wanted, source_sha) if wanted else ({}, None)
+    )
 
     recognition_ref = {
         "drawing_id": drawing_id,
@@ -253,6 +261,22 @@ def build_verified_wall_model(
 
     scale = float(calibration["millimetres_per_pdf_point"])
     page_size = _page_size(page.get("page_size_pdf_points"))
+
+    # Columns (LOD 100): confirmed column outlines, full storey height.
+    if confirmed_columns:
+        detected = {c["column_id"]: c for c in (column_loader(scale, page_size) if column_loader else [])}
+        for column_id in sorted(confirmed_columns):
+            try:
+                candidate = detected.get(column_id)
+                if candidate is None:
+                    raise ValueError("Confirmed column is no longer detected on this page")
+                height = ledger_service.resolve_column_height(ledger, column_id)
+                if height is None:
+                    raise ValueError("Column confirmation or plan placement is no longer active")
+                elements.append(columns_module.build_column_mesh(
+                    candidate, millimetres_per_pdf_point=scale, height_mm=height))
+            except ValueError as exc:
+                failed.append({"element_id": column_id, "reason": str(exc)})
     page_size_mm = (
         [round(page_size[0] * scale, 3), round(page_size[1] * scale, 3)]
         if page_size else None
@@ -295,6 +319,7 @@ def build_verified_wall_model(
         },
         "summary": {
             "confirmed_walls": len(confirmed),
+            "confirmed_columns": len(confirmed_columns),
             "meshes_built": len(elements),
             "failed": len(failed),
         },
@@ -329,6 +354,8 @@ def generate_page_model(project_folder: Path, project_id: str, drawing_id: str, 
         drawing_id=drawing_id,
         page_number=page_number,
         source_line_loader=loader,
+        column_loader=lambda scale, page_size: columns_module.page_columns(
+            folder, drawing_id, page_number, page_size=page_size, millimetres_per_pdf_point=scale),
     )
 
     path = artifacts / OUTPUT_DIRECTORY / output_artifact_name(drawing_id)

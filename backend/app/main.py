@@ -46,6 +46,8 @@ from app.services.wall_mesh_generation_router import router as wall_mesh_generat
 from app.services.drawing_snap import router as drawing_snap_router
 from app.services.plan_placement_router import router as plan_placement_router
 from app.services.recognition_supplement import router as recognition_supplement_router
+from app.services.sheet_registration import router as sheet_registration_router
+from app.services.column_router import router as column_router
 
 
 
@@ -83,6 +85,8 @@ app.include_router(wall_mesh_generation_router)
 app.include_router(drawing_snap_router)
 app.include_router(plan_placement_router)
 app.include_router(recognition_supplement_router)
+app.include_router(sheet_registration_router)
+app.include_router(column_router)
 
 app.add_middleware(
 

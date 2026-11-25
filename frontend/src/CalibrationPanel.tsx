@@ -56,6 +56,35 @@ type PlacementOptions = {
 
 type Mode = 'scale' | 'reference';
 
+type RegistrationSource = {
+  source_drawing_id: string;
+  drawing_title: string | null;
+  registered: boolean;
+  reasons: string[];
+  matched_grid_labels: number;
+  source_grid_labels: number;
+  max_offset_pt: number | null;
+  common_printed_scales: string[];
+  millimetres_per_pdf_point?: number;
+  calibration_reference?: string;
+  placement_id?: string;
+  reference_label?: string;
+  reference_point_pdf?: number[];
+};
+
+type RegistrationView = {
+  typical_wall_thickness_mm: number | null;
+  printed_scales: string[];
+  calibrated_sources: RegistrationSource[];
+  placed_sources: RegistrationSource[];
+};
+
+function registrationText(source: RegistrationSource) {
+  return source.registered
+    ? `registered: ${source.matched_grid_labels}/${source.source_grid_labels} grid labels within ${source.max_offset_pt} pt, both print ${source.common_printed_scales.join(', ')}`
+    : `not registered: ${source.reasons.join('; ')}`;
+}
+
 function formatDetail(detail: unknown): string {
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) return detail.map(d => (d as { msg?: string })?.msg ?? String(d)).join('; ');
@@ -135,6 +164,12 @@ export default function CalibrationPanel({
   const [crossJustification, setCrossJustification] = useState('');
   const [revokeReason, setRevokeReason] = useState('');
 
+  // Shortcuts that rely on proven sheet registration
+  const [registration, setRegistration] = useState<RegistrationView | null>(null);
+  const [transferSource, setTransferSource] = useState('');
+  const [transferJustification, setTransferJustification] = useState('');
+  const [refFromPlacement, setRefFromPlacement] = useState('');
+
   const base = `${API}/projects/${projectId}`;
 
   const load = useCallback(async () => {
@@ -155,6 +190,10 @@ export default function CalibrationPanel({
       setOptions(opts);
       setBaseKey(opts.suggested_base_level_key ?? '');
       setTopKey(opts.suggested_top_level_key ?? '');
+      const reg = await apiJson<RegistrationView>(`${base}/sheet-registration?target_drawing_id=${drawingId}`);
+      setRegistration(reg);
+      setTransferSource(reg.calibrated_sources.find(s => s.registered)?.source_drawing_id ?? '');
+      setRefFromPlacement(reg.placed_sources.find(s => s.registered)?.placement_id ?? '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load page data.');
     } finally {
@@ -194,6 +233,38 @@ export default function CalibrationPanel({
       setPoints(previous => (previous.length >= 2 ? [result] : [...previous, result]));
     } else {
       setRefPoint(result);
+      setRefFromPlacement('');
+    }
+  }
+
+  const transferChoice = registration?.calibrated_sources.find(s => s.source_drawing_id === transferSource) ?? null;
+  const reuseChoice = registration?.placed_sources.find(s => s.placement_id === refFromPlacement) ?? null;
+
+  async function copyScale() {
+    if (!transferChoice) return;
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      await apiJson(`${base}/scale-calibration/transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_drawing_id: transferChoice.source_drawing_id,
+          target_drawing_id: drawingId,
+          reviewer: reviewer.trim(),
+          justification: transferJustification.trim(),
+          replace_existing: replaceOk,
+        }),
+      });
+      setMessage(`Scale copied from ${transferChoice.drawing_title}.`);
+      setReplaceOk(false);
+      await load();
+      onCalibrated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Copying the scale failed.');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -265,8 +336,8 @@ export default function CalibrationPanel({
   const placementMissing: string[] = [];
   if (active) placementMissing.push('revoke the current placement first');
   if (!baseLevel) placementMissing.push('choose the base level');
-  if (!refPoint) placementMissing.push('click the shared reference point (switch to "Reference point")');
-  if (refLabel.trim().length < 2) placementMissing.push('name the reference point (e.g. Grid A/1)');
+  if (!refPoint && !reuseChoice) placementMissing.push('click the shared reference point, or reuse one from a placed plan');
+  if (!reuseChoice && refLabel.trim().length < 2) placementMissing.push('name the reference point (e.g. Grid A/1)');
   if (reviewer.trim().length < 2) placementMissing.push('enter your name');
   if (justification.trim().length < MIN_TEXT) placementMissing.push(`write a justification of at least ${MIN_TEXT} characters`);
   if (baseLevel && !baseOnDrawing && crossJustification.trim().length < MIN_TEXT) {
@@ -274,7 +345,7 @@ export default function CalibrationPanel({
   }
 
   async function savePlacement() {
-    if (!refPoint || !baseLevel) return;
+    if ((!refPoint && !reuseChoice) || !baseLevel) return;
     setBusy(true);
     setError('');
     setMessage('');
@@ -287,9 +358,10 @@ export default function CalibrationPanel({
           page_number: PAGE_NUMBER,
           base_level_key: baseLevel.level_key,
           top_level_key: topLevel?.level_key ?? null,
-          reference_point_pdf: refPoint.point_pdf,
-          reference_label: refLabel.trim(),
-          reference_snapped_line: refPoint.source_line,
+          reference_point_pdf: reuseChoice ? null : refPoint?.point_pdf,
+          reference_label: reuseChoice ? null : refLabel.trim(),
+          reference_snapped_line: reuseChoice ? null : refPoint?.source_line,
+          reference_from_placement_id: reuseChoice?.placement_id ?? null,
           reviewer: reviewer.trim(),
           justification: justification.trim(),
           cross_drawing_justification: baseOnDrawing ? null : crossJustification.trim(),
@@ -336,7 +408,8 @@ export default function CalibrationPanel({
   if (!loaded) return <div className="message">Loading calibration...</div>;
 
   const previewUrl = `${base}/phase6/preview/${drawingId}?page_number=${PAGE_NUMBER}`;
-  const shownReference = refPoint?.point_pdf ?? active?.reference_point.point_pdf ?? null;
+  const shownReference = refPoint?.point_pdf ?? reuseChoice?.reference_point_pdf
+    ?? active?.reference_point.point_pdf ?? null;
 
   return (
     <div style={{ display: 'grid', gap: 14, color: '#cbd5e1', fontSize: 13 }}>
@@ -408,6 +481,47 @@ export default function CalibrationPanel({
 
       {mode === 'scale' ? (
         <div style={{ display: 'grid', gap: 12 }}>
+          {(registration?.calibrated_sources.length ?? 0) > 0 && (
+            <div style={{ display: 'grid', gap: 8, padding: 12, border: '1px solid #2b4055', borderRadius: 10 }}>
+              <strong style={{ color: '#eaf0f8', fontSize: 12 }}>
+                Fastest: copy the scale from a calibrated sheet with the same layout
+              </strong>
+              <select value={transferSource} onChange={e => setTransferSource(e.target.value)}>
+                {registration?.calibrated_sources.map(source => (
+                  <option key={source.source_drawing_id} value={source.source_drawing_id} disabled={!source.registered}>
+                    {source.drawing_title} · {source.millimetres_per_pdf_point?.toFixed(3)} mm/pt · {registrationText(source)}
+                  </option>
+                ))}
+              </select>
+              {transferChoice && (
+                <small style={{ color: '#8fa1b5' }}>
+                  Source scale from: {transferChoice.calibration_reference}
+                </small>
+              )}
+              <label>
+                Reviewer name
+                <input value={reviewer} onChange={e => setReviewer(e.target.value)} placeholder="Name of the engineer" />
+              </label>
+              <label>
+                Justification ({transferJustification.trim().length}/{MIN_TEXT} characters minimum)
+                <input value={transferJustification} onChange={e => setTransferJustification(e.target.value)}
+                  placeholder="e.g. Same CAD layout: grid bubbles match and both sheets print 1:200." />
+              </label>
+              <div>
+                <button
+                  className="primary"
+                  disabled={busy || !transferChoice?.registered || reviewer.trim().length < 2
+                    || transferJustification.trim().length < MIN_TEXT || (existing !== null && !replaceOk)}
+                  onClick={copyScale}
+                >
+                  Copy scale to this sheet
+                </button>
+              </div>
+              {existing && !replaceOk && (
+                <small style={{ color: '#fbbf24' }}>This sheet already has a scale; tick “replace” below to overwrite it.</small>
+              )}
+            </div>
+          )}
           <div style={{ display: 'grid', gap: 4, fontSize: 12 }}>
             {[0, 1].map(index => {
               const point = points[index];
@@ -463,14 +577,31 @@ export default function CalibrationPanel({
           {!options?.height_report_available && (
             <div style={banner('#b45309')}>The Stage 5.3.4 level register has not been generated for this project.</div>
           )}
+          {(registration?.placed_sources.length ?? 0) > 0 && (
+            <label>
+              Reuse the reference point of a placed plan (registered sheets only)
+              <select value={refFromPlacement} onChange={e => { setRefFromPlacement(e.target.value); if (e.target.value) setRefPoint(null); }}>
+                <option value="">No — I will click a point on this drawing</option>
+                {registration?.placed_sources.map(source => (
+                  <option key={source.placement_id} value={source.placement_id} disabled={!source.registered}>
+                    “{source.reference_label}” from {source.drawing_title} · {registrationText(source)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <span style={{ fontSize: 12 }}>
             <strong style={{ color: REFERENCE_COLOR }}>Reference point:</strong>{' '}
-            {refPoint ? describePoint(refPoint) : active ? `current: “${active.reference_point.label}”` : 'click it on the drawing'}
+            {reuseChoice
+              ? `reusing “${reuseChoice.reference_label}” from ${reuseChoice.drawing_title} (same sheet position)`
+              : refPoint ? describePoint(refPoint) : active ? `current: “${active.reference_point.label}”` : 'click it on the drawing'}
           </span>
-          <label>
-            Reference point name (use the same point on every plan)
-            <input value={refLabel} onChange={e => setRefLabel(e.target.value)} placeholder="e.g. Grid A/1 intersection" />
-          </label>
+          {!reuseChoice && (
+            <label>
+              Reference point name (use the same point on every plan)
+              <input value={refLabel} onChange={e => setRefLabel(e.target.value)} placeholder="e.g. Grid A/1 intersection" />
+            </label>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <label>
               Base level (the slab this plan sits on)

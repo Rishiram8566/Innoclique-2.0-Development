@@ -216,7 +216,7 @@ def test_supplement_route_then_confirm_build_and_serve_a_new_vertical_wall(proje
     ledger_service.save_ledger(project, ledger)
 
     artifact, _ = generation.generate_page_model(project, PROJECT, DRAWING, 1)
-    assert artifact["summary"] == {"confirmed_walls": 1, "meshes_built": 1, "failed": 0}
+    assert artifact["summary"] == {"confirmed_walls": 1, "confirmed_columns": 0, "meshes_built": 1, "failed": 0}
     assert artifact["elements"][0]["provenance"]["candidate_type"] == "unclassified_parallel_line_pair_candidate"
 
     served = json.loads(main_module.get_drawing_meshes(PROJECT, DRAWING).body)

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.services import height_verification_ledger as ledger_service
 from app.services.recognition_supplement import read_recognition
+from app.services.sheet_registration import sheet_index, typical_wall_thickness_mm
 from app.services.wall_height_evidence_association import (
     OUTPUT_ARTIFACT_NAME as HEIGHT_ASSOCIATION_ARTIFACT_NAME,
 )
@@ -101,6 +102,7 @@ def get_page_wall_candidates(
             height_report=inputs["height"],
             validation_report=inputs["validation"],
             calibration_report=inputs["calibration"],
+            typical_wall_thickness_mm=typical_wall_thickness_mm(sheet_index(folder), _safe_drawing_id(drawing_id)),
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

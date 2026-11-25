@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import SceneViewer from './SceneViewer';
 import HeightVerificationPanel from './HeightVerificationPanel';
 import ModelViewer3D from './ModelViewer3D';
+import ColumnsBox from './ColumnsBox';
 import CalibrationPanel from './CalibrationPanel';
 import {
   Building2,
@@ -395,7 +396,10 @@ export default function App() {
         </div>
 
         {active && selectedDrawingId ? (
-          <HeightVerificationPanel key={calibrationVersion} projectId={active.id} drawingId={selectedDrawingId} />
+          <div style={{ display: 'grid', gap: 18 }}>
+            <HeightVerificationPanel key={calibrationVersion} projectId={active.id} drawingId={selectedDrawingId} />
+            <ColumnsBox key={`columns-${calibrationVersion}`} projectId={active.id} drawingId={selectedDrawingId} />
+          </div>
         ) : (
           <div className="message">
             Select a project and a drawing sheet above to verify wall heights.

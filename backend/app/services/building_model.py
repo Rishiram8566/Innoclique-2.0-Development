@@ -119,8 +119,14 @@ def build_building_model(project_folder: Path, project_id: str) -> dict[str, Any
         for path in sorted(mesh_dir.glob("*_stage5_4.json")):
             drawing_id = path.name[: -len("_stage5_4.json")]
             if not any(d == drawing_id for d, _ in placed):
-                excluded.append({"drawing_id": drawing_id, "drawing_title": None,
+                try:
+                    title = json.loads(path.read_text(encoding="utf-8")).get("drawing_title")
+                except (OSError, ValueError):
+                    title = None
+                excluded.append({"drawing_id": drawing_id, "drawing_title": title,
                                  "reason": "Walls generated, but the plan has no placement (level and reference point)."})
+
+    slabs = approximate_slabs(storeys, elements)
 
     return {
         "schema_version": "0.1.0",
@@ -144,12 +150,76 @@ def build_building_model(project_folder: Path, project_id: str) -> dict[str, Any
         },
         "storeys": storeys,
         "elements": elements,
+        "slabs": slabs,
         "withheld_elements": withheld,
         "excluded_plans": excluded,
         "limitations": [
             "Only reviewer-confirmed walls on reviewer-placed plans are included.",
             "Plans are aligned by one shared reference point each (translation only, no rotation).",
             "Base elevations come from annotated levels chosen by the reviewer.",
-            "No slabs, columns, beams, doors or windows are generated yet.",
+            "Slabs are approximate: outlined around each storey's confirmed columns, thickness not "
+            "established (the drawings refer to separate structure drawings).",
+            "No beams, doors or windows are generated yet.",
         ],
     }
+
+
+def _convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    points = sorted(set(points))
+    if len(points) < 3:
+        return points
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower, upper = [], []
+    for p in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def approximate_slabs(storeys: list[dict[str, Any]], elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    LOD 200 slab extents: at each placed storey's base level (SSL = top of slab),
+    outlined by the convex hull of that storey's served columns; the highest
+    storey also gets one at its top level. Thickness is not established.
+    """
+    by_storey: dict[str, list[tuple[float, float]]] = {}
+    for element in elements:
+        if element.get("element_type") != "column":
+            continue
+        corners = [(v[0], v[1]) for v in element["mesh"]["vertices"]]
+        by_storey.setdefault(element["storey"]["placement_id"], []).extend(corners)
+
+    slabs = []
+    ordered = sorted(storeys, key=lambda s: s["base_elevation_mm"])
+    for position, storey in enumerate(ordered):
+        hull = _convex_hull(by_storey.get(storey["placement_id"], []))
+        if len(hull) < 3:
+            continue
+        levels = [("base", storey["base_level_key"], storey["base_elevation_mm"])]
+        if position == len(ordered) - 1 and storey.get("top_level_key") and storey.get("storey_height_mm"):
+            levels.append(("top", storey["top_level_key"],
+                           storey["base_elevation_mm"] + storey["storey_height_mm"]))
+        for which, level_key, elevation in levels:
+            slabs.append({
+                "element_id": f"slab:{storey['placement_id']}:{which}",
+                "element_type": "slab_extent",
+                "level_key": level_key,
+                "elevation_mm": round(float(elevation), 3),
+                "outline_mm": [[round(x, 3), round(y, 3)] for x, y in hull],
+                "thickness_mm": None,
+                "approximate": True,
+                "lod": {"category": "slab", "minimum_lod": 200},
+                "basis": (
+                    f"convex hull of the confirmed columns on {storey.get('drawing_title')}; "
+                    f"level {level_key} from the plan placement"
+                ),
+            })
+    return slabs
