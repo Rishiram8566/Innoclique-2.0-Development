@@ -13,6 +13,8 @@ type VerificationStatus = 'unverified' | 'confirmed' | 'rejected';
 type WallCandidate = {
   element_id: string;
   candidate_index: number;
+  element_type: string;
+  recognition_source?: string;
   bbox_pdf_points: number[];
   length_pdf_points: number | null;
   thickness_pdf_points: number | null;
@@ -190,6 +192,7 @@ export default function HeightVerificationPanel({
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [hovered, setHovered] = useState<string | null>(null);
+  const [fitSignal, setFitSignal] = useState(0);
   const [heightId, setHeightId] = useState('');
   const [cited, setCited] = useState<Set<string>>(new Set());
   const [reviewer, setReviewer] = useState('');
@@ -378,6 +381,32 @@ export default function HeightVerificationPanel({
     }
   }
 
+  async function findMoreWalls() {
+    setBusy(true);
+    setNotice('');
+    setError('');
+    try {
+      const result = await apiJson<{ drawings: { added_candidates: number; added_by_orientation: Record<string, number> }[] }>(
+        `${API}/projects/${projectId}/geometry/stage5-1-8/supplement`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ drawing_ids: [drawingId] }),
+        },
+      );
+      const summary = result.drawings[0];
+      setNotice(
+        `Recognition re-run: ${summary?.added_candidates ?? 0} new candidate(s) ` +
+        `(${summary?.added_by_orientation?.vertical ?? 0} vertical). Existing decisions are unchanged.`,
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Recognition re-run failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function revoke(verificationId: string) {
     setBusy(true);
     setNotice('');
@@ -452,7 +481,7 @@ export default function HeightVerificationPanel({
               <color attach="background" args={['#0b1220']} />
               <Suspense fallback={null}>
                 <group>
-                    <PdfPage url={previewUrl} />
+                    <PdfPage url={previewUrl} fitSignal={fitSignal} />
                     {view.candidates.map(candidate => {
                       const isSelected = selected.has(candidate.element_id);
                       const overlaps = !isSelected && overlapsSelection.has(candidate.element_id);
@@ -498,13 +527,25 @@ export default function HeightVerificationPanel({
                   `${mm(hoveredCandidate.thickness_mm_provisional)} thick`
                 : 'Click candidates to select. Right-drag to pan, scroll to zoom.'}
             </span>
+            <button onClick={() => setFitSignal(n => n + 1)} style={{ padding: '8px 12px', borderRadius: 7, border: '1px solid #475569', background: '#172033', color: '#e2e8f0', cursor: 'pointer', fontSize: 12 }}>Fit page</button>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', fontSize: 12 }}>
+            <button disabled={busy} onClick={findMoreWalls} style={secondaryButtonStyle(busy)}>
+              {busy ? 'Working…' : 'Find more walls on this drawing'}
+            </button>
+            <span style={{ color: '#8fa1b5' }}>
+              Re-runs recognition with separate horizontal and vertical budgets and adds only new pairs
+              (marked “new”). “Unclassified pair” means two parallel lines with no wall label nearby —
+              confirm one only if the drawing shows a wall there.
+            </span>
           </div>
 
           <div style={{ maxHeight: 260, overflow: 'auto', border: '1px solid #29384a', borderRadius: 10 }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead style={{ position: 'sticky', top: 0, background: '#121d2b' }}>
                 <tr>
-                  {['', '#', 'Length', 'Thickness', 'Shares line with', 'Geometry', 'Height status'].map(h => (
+                  {['', '#', 'Recognised as', 'Length', 'Thickness', 'Shares line with', 'Geometry', 'Height status'].map(h => (
                     <th key={h} style={cellStyle(true)}>{h}</th>
                   ))}
                 </tr>
@@ -533,6 +574,12 @@ export default function HeightVerificationPanel({
                         />
                       </td>
                       <td style={cellStyle()}>{candidate.candidate_index}</td>
+                      <td style={cellStyle()} title={candidate.element_type}>
+                        {candidate.element_type.startsWith('unclassified') ? 'unclassified pair' : 'wall'}
+                        {candidate.recognition_source === 'stage5_1_8_supplement' && (
+                          <span style={{ color: '#38bdf8' }}> · new</span>
+                        )}
+                      </td>
                       <td style={cellStyle()}>{mm(candidate.length_mm_provisional)}</td>
                       <td style={cellStyle()}>{mm(candidate.thickness_mm_provisional)}</td>
                       <td style={cellStyle()}>

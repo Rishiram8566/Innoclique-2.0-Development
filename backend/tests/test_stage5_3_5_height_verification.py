@@ -216,7 +216,6 @@ def test_evidence_from_another_candidate_is_rejected():
 
 
 @pytest.mark.parametrize("overrides,match", [
-    ({"element_ids": [element(9, 10)]}, "Not a supported wall"),
     ({"element_ids": [element(5, 6)]}, "Not a supported wall"),
     ({"element_ids": [element(1, 2), element(1, 2)]}, "unique"),
     ({"element_ids": []}, "At least one"),
@@ -300,7 +299,7 @@ def test_page_listing_reports_status_and_provisional_mm():
         }}}},
     )
     assert view["summary"] == {
-        "wall_candidates": 3, "height_confirmed": 1, "height_rejected": 0, "unverified": 2,
+        "wall_candidates": 4, "height_confirmed": 1, "height_rejected": 0, "unverified": 3,
     }
     first = view["candidates"][0]
     assert first["shares_source_line_with"] == [element(1, 5)]
@@ -360,7 +359,7 @@ def test_router_rejects_bad_ids_and_missing_report(project_dir):
         assert error.value.status_code == 404
 
     with pytest.raises(HTTPException) as error:
-        router_module.create_height_verification(PROJECT, payload(element_ids=[element(9, 10)]))
+        router_module.create_height_verification(PROJECT, payload(element_ids=[element(7, 8)]))
     assert error.value.status_code == 422
 
     (project_dir / "artifacts" / OUTPUT_ARTIFACT_NAME).unlink()

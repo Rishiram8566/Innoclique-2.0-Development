@@ -28,6 +28,7 @@ from typing import Any
 
 from app.services import bim_geometry_builder as wall_builder
 from app.services import height_verification_ledger as ledger_service
+from app.services.recognition_supplement import read_recognition
 
 
 STAGE = "5.4"
@@ -210,9 +211,11 @@ def build_verified_wall_model(
             _, lines = ledger_service.element_source_lines(element_id)
             primitives = [p for key in lines for p in lines_by_key.get(key, [])]
 
+            # Only reviewer-confirmed elements reach this point, so an
+            # unclassified parallel pair may be built as the wall it was confirmed as.
             mesh = wall_builder.build_wall_mesh(
                 recognition_report=recognition_ref,
-                candidate=candidate,
+                candidate={**candidate, "reviewer_confirmed_wall": True},
                 source_primitives=primitives,
                 calibration_record=calibration,
                 height_evidence=height_evidence,
@@ -311,7 +314,7 @@ def generate_page_model(project_folder: Path, project_id: str, drawing_id: str, 
     folder = Path(project_folder)
     artifacts = folder / "artifacts"
 
-    recognition = ledger_service.read_required_artifact(folder, ledger_service.RECOGNITION_ARTIFACT_NAME)
+    recognition = read_recognition(folder)
     calibration = ledger_service.read_optional_artifact(folder, ledger_service.CALIBRATION_ARTIFACT_NAME)
     ledger = ledger_service.load_ledger(folder, project_id)
 

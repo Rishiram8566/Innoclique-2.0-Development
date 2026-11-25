@@ -157,7 +157,7 @@ function Footprint({ element }: { element: DisplayElement }) {
  * (drei's Bounds keeps the camera's starting direction relative to the
  * content centre, which tilted the plan into a parallelogram.)
  */
-function useFitOrthographicToPage(width: number, height: number) {
+function useFitOrthographicToPage(width: number, height: number, fitSignal = 0) {
   const camera = useThree(state => state.camera);
   const size = useThree(state => state.size);
   const controls = useThree(state => state.controls) as
@@ -177,22 +177,25 @@ function useFitOrthographicToPage(width: number, height: number) {
       controls.target.set(cx, cy, 0);
       controls.update?.();
     }
-  }, [camera, controls, size.width, size.height, width, height]);
+  }, [camera, controls, size.width, size.height, width, height, fitSignal]);
 }
 
 export function PdfPage({
   url,
   onPagePoint,
+  fitSignal = 0,
 }: {
   url: string;
   /** Called with PDF page coordinates (x right, y down) when the page is clicked. */
   onPagePoint?: (x: number, y: number) => void;
+  /** Change this number to re-frame the whole page (e.g. a "Fit page" button). */
+  fitSignal?: number;
 }) {
   const texture = useLoader(THREE.TextureLoader, url);
   const image = texture.image as HTMLImageElement;
   const pageWidth = image.width / PDF_PREVIEW_SCALE;
   const pageHeight = image.height / PDF_PREVIEW_SCALE;
-  useFitOrthographicToPage(pageWidth, pageHeight);
+  useFitOrthographicToPage(pageWidth, pageHeight, fitSignal);
 
   return (
     <mesh

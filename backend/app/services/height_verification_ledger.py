@@ -143,7 +143,7 @@ def _shared_line_conflicts(element_ids: list[str]) -> dict[str, list[str]]:
 def _is_supported_wall(candidate: Any) -> bool:
     return (
         isinstance(candidate, dict)
-        and candidate.get("element_type") in wall_builder.SUPPORTED_WALL_CANDIDATE_TYPES
+        and candidate.get("element_type") in wall_builder.REVIEWER_CONFIRMABLE_PAIR_TYPES
         and candidate.get("geometry_type") in wall_builder.SUPPORTED_WALL_GEOMETRIES
         and candidate.get("verification_required") is True
     )
@@ -190,6 +190,9 @@ def _validation_index(validation_report: dict[str, Any] | None) -> dict[tuple, s
 
 
 def _validation_status(index: dict[tuple, str], drawing_id: str, page: int, candidate: dict) -> str:
+    # Stage 5.1.8 supplement candidates carry their own sidecar geometry check.
+    if candidate.get("geometry_validation_status"):
+        return str(candidate["geometry_validation_status"])
     if not index:
         return "validation_report_not_available"
     source = candidate.get("source") or {}
@@ -387,6 +390,7 @@ def list_page_wall_candidates(
             "element_id": element_id,
             "candidate_index": index,
             "element_type": candidate.get("element_type"),
+            "recognition_source": candidate.get("recognition_source", "stage5_1_6"),
             "geometry_type": candidate.get("geometry_type"),
             "bbox_pdf_points": candidate.get("bbox_pdf_points"),
             "length_pdf_points": round(dims[0], 3) if dims else None,

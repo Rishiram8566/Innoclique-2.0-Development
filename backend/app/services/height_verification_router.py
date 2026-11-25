@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services import height_verification_ledger as ledger_service
+from app.services.recognition_supplement import read_recognition
 from app.services.wall_height_evidence_association import (
     OUTPUT_ARTIFACT_NAME as HEIGHT_ASSOCIATION_ARTIFACT_NAME,
 )
@@ -61,9 +62,7 @@ def _safe_drawing_id(drawing_id: str) -> str:
 
 def _load_inputs(folder: Path, project_id: str) -> dict:
     try:
-        recognition = ledger_service.read_required_artifact(
-            folder, ledger_service.RECOGNITION_ARTIFACT_NAME
-        )
+        recognition = read_recognition(folder)
         ledger = ledger_service.load_ledger(folder, project_id)
         return {
             "recognition": recognition,

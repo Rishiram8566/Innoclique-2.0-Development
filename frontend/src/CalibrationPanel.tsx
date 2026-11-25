@@ -112,6 +112,7 @@ export default function CalibrationPanel({
   const [options, setOptions] = useState<PlacementOptions | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [mode, setMode] = useState<Mode>('scale');
+  const [fitSignal, setFitSignal] = useState(0);
   const [snapping, setSnapping] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -374,6 +375,7 @@ export default function CalibrationPanel({
         <span style={{ color: '#94a3b8', fontSize: 12 }}>Clicks on the drawing set:</span>
         <button onClick={() => setMode('scale')} style={modeButton(mode === 'scale')}>Scale points A / B</button>
         <button onClick={() => setMode('reference')} style={modeButton(mode === 'reference')}>Reference point</button>
+        <button onClick={() => setFitSignal(n => n + 1)} style={{ padding: '8px 12px', borderRadius: 7, border: '1px solid #475569', background: '#172033', color: '#e2e8f0', cursor: 'pointer', fontSize: 12 }}>Fit page</button>
         <span style={{ color: '#94a3b8', fontSize: 12 }}>
           Clicks snap to the nearest drawn line end within 8 PDF points. Scroll to zoom, right-drag to pan.
         </span>
@@ -387,7 +389,7 @@ export default function CalibrationPanel({
         <Canvas orthographic camera={{ position: [0, 0, 1500], zoom: 1, near: 0.1, far: 5000 }}>
           <color attach="background" args={['#0b1220']} />
           <Suspense fallback={null}>
-            <PdfPage url={previewUrl} onPagePoint={onPagePoint} />
+            <PdfPage url={previewUrl} onPagePoint={onPagePoint} fitSignal={fitSignal} />
             {points.map((point, index) => (
               <Marker key={index} point={point.point_pdf} color={MARKER_COLORS[index]} />
             ))}

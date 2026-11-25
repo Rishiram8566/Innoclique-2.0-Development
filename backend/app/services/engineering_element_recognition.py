@@ -1144,7 +1144,12 @@ def _wall_pair_candidates(lines, text_spans, page_number, page_width, page_heigh
 
                           max_candidates=MAX_WALL_CANDIDATES_PER_PAGE):
 
-    """Conservative plan-only wall-edge hypotheses with geometric deduplication."""
+    """Conservative plan-only wall-edge hypotheses with geometric deduplication.
+
+    Horizontal and vertical pairs each get their own budget of
+    ``max_candidates``. A single shared budget let dense horizontal linework
+    (hatching, louvres) exhaust it before any vertical pair was examined.
+    """
 
     horizontal, vertical = [], []
 
@@ -1170,7 +1175,13 @@ def _wall_pair_candidates(lines, text_spans, page_number, page_width, page_heigh
 
         ordered = sorted(collection, key=lambda ln: _line_center(ln, orientation))
 
+        found_in_orientation = 0
+
         for i, a in enumerate(ordered):
+
+            if found_in_orientation >= max_candidates:
+
+                break
 
             a0, a1 = _interval(a, orientation)
 
@@ -1329,9 +1340,11 @@ def _wall_pair_candidates(lines, text_spans, page_number, page_width, page_heigh
 
                 })
 
-                if len(result) >= max_candidates:
+                found_in_orientation += 1
 
-                    return _deduplicate_candidates(result)
+                if found_in_orientation >= max_candidates:
+
+                    break
 
     return _deduplicate_candidates(result)
 

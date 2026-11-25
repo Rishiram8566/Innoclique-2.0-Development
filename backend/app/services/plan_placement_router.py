@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.services import building_model
 from app.services import height_verification_ledger as ledger_service
 from app.services.height_verification_router import _LEDGER_LOCK
+from app.services.recognition_supplement import read_recognition
 from app.services.wall_height_evidence_association import (
     OUTPUT_ARTIFACT_NAME as HEIGHT_ASSOCIATION_ARTIFACT_NAME,
 )
@@ -79,7 +80,7 @@ def create_placement(project_id: str, payload: PlacementRequest):
     request["drawing_id"] = _uuid(request["drawing_id"], "Drawing")
     with _LEDGER_LOCK:
         try:
-            recognition = ledger_service.read_required_artifact(folder, ledger_service.RECOGNITION_ARTIFACT_NAME)
+            recognition = read_recognition(folder)
             height_report = ledger_service.read_optional_artifact(folder, HEIGHT_ASSOCIATION_ARTIFACT_NAME)
             if height_report is None:
                 raise HTTPException(status_code=409, detail="Stage 5.3.4 level register has not been generated.")
