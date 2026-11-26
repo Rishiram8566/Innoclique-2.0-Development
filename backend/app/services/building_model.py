@@ -33,6 +33,7 @@ import copy
 import bisect
 import json
 import math
+import threading
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -70,9 +71,9 @@ def _current_scale(calibration_report: dict[str, Any] | None, drawing_id: str, p
 # requests at once), and a large project takes seconds to build. One build per project at a time.
 MODEL_CACHE_SIZE = 6
 _MODEL_CACHE: dict[str, tuple[str, dict[str, Any]]] = {}
-_MODEL_LOCKS: dict[str, "threading.Lock"] = {}
+_MODEL_LOCKS: dict[str, threading.Lock] = {}
 _MODEL_JSON: dict[str, tuple[dict[str, Any], bytes]] = {}
-_CACHE_GUARD = None
+_CACHE_GUARD = threading.Lock()
 CACHE_IGNORED_FILES = {"auto_model_status.json"}       # progress notes, rewritten while a run is in progress
 
 
@@ -93,7 +94,27 @@ def cached_building_model_json(folder: Path, project_id: str) -> bytes:
     The model as JSON bytes, made once per build: converting a large model to JSON on every request (every mesh
     coordinate) took seconds, so the response is sent as these bytes.
     """
-    model = cached_building_model(folder, project_id)
+    return _model_json(project_id, cached_building_model(folder, project_id))
+
+
+def viewer_model_json(folder: Path, project_id: str) -> tuple[bytes, bool]:
+    """
+    The model for the viewer, and whether it is the last one built while a Generate run is in progress. A run keeps
+    changing the project's files, so every request during it would rebuild the model (seconds for a large
+    project) only to show a half-made state; the last model built is sent instead, and the viewer
+    reloads when the run finishes. With no model built yet, it is built now.
+    """
+    from app.services import auto_pipeline
+
+    if auto_pipeline.is_running(project_id):
+        with _CACHE_GUARD:
+            hit = _MODEL_CACHE.get(project_id)
+        if hit is not None:
+            return _model_json(project_id, hit[1]), True
+    return cached_building_model_json(folder, project_id), False
+
+
+def _model_json(project_id: str, model: dict[str, Any]) -> bytes:
     with _CACHE_GUARD:
         hit = _MODEL_JSON.get(project_id)
         if hit is not None and hit[0] is model:
@@ -108,11 +129,6 @@ def cached_building_model_json(folder: Path, project_id: str) -> bytes:
 
 def cached_building_model(folder: Path, project_id: str) -> dict[str, Any]:
     """build_building_model, reused while the project's files are unchanged (callers must not modify it)."""
-    import threading
-
-    global _CACHE_GUARD
-    if _CACHE_GUARD is None:
-        _CACHE_GUARD = threading.Lock()
     with _CACHE_GUARD:
         lock = _MODEL_LOCKS.setdefault(project_id, threading.Lock())
     with lock:

@@ -9,7 +9,7 @@ const API = 'http://127.0.0.1:8000/api';
 const PAGE_NUMBER = 1;
 const MM_PER_M = 1000;
 
-type LOD = '100' | '200' | '300' | '400' | '500';
+export type LOD = '100' | '200' | '300' | '400' | '500';
 const LODS: LOD[] = ['100', '200', '300', '400', '500'];
 
 type MeshElement = {
@@ -282,6 +282,10 @@ function realisticColor(element: MeshElement): string | null {
   const type = element.element_type ?? 'wall';
   const component = element.component ?? '';
   const material = `${component} ${element.host_component ?? ''} ${(element as any).material ?? ''}`;
+  // A BIM (IFC) model states the material of its trims, mullions, columns and slabs: keep that colour
+  // (e.g. dark aluminium fins) instead of the generic finish used for drawings.
+  if (element.detected_by === 'ifc' && element.color
+      && ['window muntin', 'trim', 'fascia', 'column', 'beam', 'slab', 'member'].includes(type)) return element.color;
   if (type === 'wall' || type === 'parapet') return wallFinish(material, isExteriorWall(element));
   if (type === 'column' && element.host_component) return wallFinish(element.host_component, isExteriorWall(element));
   if (type === 'chimney') return null;
@@ -575,12 +579,12 @@ function HoverCard({ element }: { element: MeshElement | null }) {
       background: 'rgba(15,15,18,.88)', color: '#f1f5f9', borderRadius: 10, padding: '8px 12px',
       border: '1px solid rgba(255,255,255,.08)', fontSize: 12, boxShadow: '0 4px 18px rgba(0,0,0,.35)',
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#94a3b8', fontSize: 11 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--muted)', fontSize: 11 }}>
         <span style={{ width: 8, height: 8, borderRadius: 2, background: element.color ?? componentColor(element.component ?? type) }} />
         {TYPE_LABEL[type] ?? type}
       </div>
       <div style={{ fontWeight: 700, margin: '2px 0' }}>{title}</div>
-      <div style={{ fontFamily: 'ui-monospace, monospace', color: '#cbd5e1' }}>
+      <div style={{ fontFamily: 'ui-monospace, monospace', color: 'var(--ink-2)' }}>
         {element.opening
           ? `${element.opening.tag ?? title} · ${m(element.opening.width_mm)} × ${m(element.opening.head_mm - element.opening.sill_mm)} m`
             + (element.opening.height_source === 'assumed_typical' ? ' (height assumed)' : '')
@@ -591,12 +595,12 @@ function HoverCard({ element }: { element: MeshElement | null }) {
             : `${m(d.length)} × ${m(d.thickness)} × ${m(d.height)} m`}
       </div>
       {element.furniture && (
-        <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 2 }}>
+        <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>
           {element.furniture.room} · indicative (typical size, not on the drawing)
         </div>
       )}
       {element.source_note && (
-        <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 2 }}>From the drawing note “{element.source_note}”</div>
+        <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>From the drawing note “{element.source_note}”</div>
       )}
     </div>
   );
@@ -953,16 +957,16 @@ function DrawingModelView({
             : 'No 3D model has been generated for this drawing yet. Confirm walls in section 04, then generate.'}
         </div>
         <div>{generateButton}</div>
-        {status === 'none' && message && <div className="message" style={{ color: '#fbbf24' }}>{message}</div>}
+        {status === 'none' && message && <div className="message" style={{ color: 'var(--warn)' }}>{message}</div>}
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'grid', gap: 14, color: '#cbd5e1', fontSize: 13 }}>
+    <div style={{ display: 'grid', gap: 14, color: 'var(--ink-2)', fontSize: 13 }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'center' }}>
         <span>Walls in model: {model.serving_gate.served}</span>
-        <span style={{ color: model.serving_gate.withheld ? '#fbbf24' : undefined }}>
+        <span style={{ color: model.serving_gate.withheld ? 'var(--warn)' : undefined }}>
           Withheld: {model.serving_gate.withheld}
         </span>
         <span>Stage {model.stage}</span>
@@ -970,13 +974,13 @@ function DrawingModelView({
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ color: '#94a3b8', fontSize: 12 }}>Level of detail</span>
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>Level of detail</span>
         {LODS.map(level => (
           <button key={level} onClick={() => setLod(level)} style={lodButton(lod === level)}>
             LOD {level}
           </button>
         ))}
-        <span style={{ color: '#94a3b8', fontSize: 12, marginLeft: 12 }}>Frame</span>
+        <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Frame</span>
         <button
           onClick={() => { setFrame('walls'); setFrameNonce(n => n + 1); }}
           disabled={visible.length === 0}
@@ -991,7 +995,7 @@ function DrawingModelView({
         >
           Whole sheet
         </button>
-        <span style={{ color: '#94a3b8', fontSize: 12, marginLeft: 12 }}>Drawing underlay</span>
+        <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Drawing underlay</span>
         <button onClick={() => { setShowDrawing(true); setFrameNonce(n => n + 1); }} style={lodButton(showDrawing)}>
           Show
         </button>
@@ -1004,7 +1008,7 @@ function DrawingModelView({
 
       <div style={{
         height: 560, width: '100%', overflow: 'hidden', borderRadius: 14,
-        border: '1px solid #334155', background: 'linear-gradient(#dfe7ef, #f4f6f8)',
+        border: '1px solid var(--line)', background: 'linear-gradient(#eef3fa, #fbfcfe)',
       }}>
         <Canvas shadows camera={{ position: [60, 90, 140], fov: 45, near: 0.1, far: 5000 }}>
           <hemisphereLight args={['#ffffff', '#b0a998', 0.6]} />
@@ -1059,7 +1063,7 @@ function DrawingModelView({
         </Canvas>
       </div>
 
-      <small style={{ color: '#8fa1b5' }}>
+      <small style={{ color: 'var(--muted)' }}>
         {model.drawing_title} · Page {PAGE_NUMBER} · page-local metres from a calibration that still
         requires verification
         {model.calibration ? ` (${model.calibration.millimetres_per_pdf_point.toFixed(3)} mm per PDF point)` : ''}
@@ -1071,7 +1075,7 @@ function DrawingModelView({
 
       {selected && (
         <div style={{ ...noteStyle, display: 'grid', gap: 6 }}>
-          <strong style={{ color: '#eaf0f8' }}>
+          <strong style={{ color: 'var(--ink)' }}>
             {(selected.component ?? 'wall').replace(/^./, c => c.toUpperCase())} · {selected.element_id}
           </strong>
           <span>
@@ -1122,22 +1126,25 @@ function DrawingModelView({
 
 const noteStyle: React.CSSProperties = {
   padding: '10px 12px',
-  border: '1px solid #475569',
-  borderRadius: 10,
-  background: '#172033',
+  border: '1px solid var(--line)',
+  borderRadius: 12,
+  background: 'var(--surface-2)',
   fontSize: 12,
   lineHeight: 1.6,
 };
 
+// Innoclique brand: the chosen option is outlined in orange on a warm tint, the others sit on navy.
 function lodButton(active: boolean): React.CSSProperties {
   return {
-    padding: '8px 12px',
-    borderRadius: 7,
-    border: `1px solid ${active ? '#b7f36b' : '#475569'}`,
-    background: active ? '#24331a' : '#172033',
-    color: '#e2e8f0',
+    padding: '8px 13px',
+    borderRadius: 999,
+    border: `1px solid ${active ? 'var(--orange)' : 'var(--line-2)'}`,
+    background: active ? 'var(--orange-soft)' : 'var(--surface)',
+    color: active ? 'var(--ink)' : 'var(--ink-2)',
+    fontWeight: active ? 700 : 500,
     cursor: 'pointer',
     fontSize: 12,
+    transition: 'background .15s, border-color .15s',
   };
 }
 
@@ -1374,6 +1381,111 @@ function SlabPlate({ slab, opacity, finish }: { slab: SlabData; opacity: number;
   );
 }
 
+// Plan centre of each storey (three.js units), to tell an outside wall's inner face from its outer face.
+function storeyCentres(elements: BuildingElement[]): Record<string, [number, number, number]> {
+  const boxes: Record<string, number[]> = {};
+  elements.forEach(e => {
+    if (e.element_type !== 'wall' || !e.is_external) return;
+    const b = boxes[e.storey.placement_id] ?? [Infinity, Infinity, -Infinity, -Infinity];
+    e.mesh.vertices.forEach(v => { b[0] = Math.min(b[0], v[0]); b[1] = Math.min(b[1], v[1]); b[2] = Math.max(b[2], v[0]); b[3] = Math.max(b[3], v[1]); });
+    boxes[e.storey.placement_id] = b;
+  });
+  const centres: Record<string, [number, number, number]> = {};
+  Object.entries(boxes).forEach(([id, b]) => { centres[id] = toThree([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0]); });
+  return centres;
+}
+
+export type ShowcaseSummary = { elements: number; storeys: number; rooms: number; furniture: number };
+
+/**
+ * The landing page's showcase: a built model turning slowly at the chosen LOD, with the same look as the
+ * viewer but no editing tools. Drag to turn it; it keeps turning by itself unless the visitor prefers less motion.
+ */
+export function ShowcaseModel({ url, lod = '500', onLoaded }: {
+  url: string; lod?: LOD; onLoaded?: (summary: ShowcaseSummary) => void;
+}) {
+  const [data, setData] = useState<BuildingResponse | null>(null);
+  const [failed, setFailed] = useState(false);
+  const loaded = useRef(onLoaded);
+  loaded.current = onLoaded;
+  useEffect(() => {
+    let cancelled = false;
+    fetch(url)
+      .then(response => { if (!response.ok) throw new Error(String(response.status)); return response.json(); })
+      .then((body: BuildingResponse) => {
+        if (cancelled) return;
+        setData(body);
+        loaded.current?.({
+          elements: body.elements.length, storeys: body.storeys.length, rooms: (body.rooms ?? []).length,
+          furniture: body.elements.filter(e => e.element_type === 'furniture').length,
+        });
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [url]);
+
+  const visible = useMemo(() => (data?.elements ?? []).filter(
+    e => Number(lod) >= (e.lod?.minimum_lod ?? 300) && Number(lod) <= (e.lod?.maximum_lod ?? 500)), [data, lod]);
+  const centres = useMemo(() => storeyCentres(data?.elements ?? []), [data]);
+  // Where the model stands and how big it is (three.js units), for the ground shadow and the light.
+  const ground = useMemo(() => {
+    const vs = (data?.elements ?? []).flatMap(e => e.mesh.vertices);
+    if (!vs.length) return { centre: [0, 0, 0] as [number, number, number], size: 20 };
+    const xs = vs.map(v => v[0]), ys = vs.map(v => v[1]), zs = vs.map(v => v[2]);
+    const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+    return {
+      centre: toThree([(x0 + x1) / 2, (y0 + y1) / 2, Math.min(...zs)]),
+      size: Math.max(x1 - x0, y1 - y0) / MM_PER_M,
+    };
+  }, [data]);
+  const calm = useMemo(() => typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches, []);
+  const noop = useCallback(() => {}, []);
+
+  if (failed) return <div className="showcase-state">The sample model could not be loaded.</div>;
+  if (!data) return <div className="showcase-state"><span className="loader" /> Loading the sample model…</div>;
+
+  const [cx, gy, cz] = ground.centre;
+  const reach = ground.size * 1.5 + 10;
+  return (
+    <Canvas shadows dpr={[1, 1.75]} gl={{ alpha: true, antialias: true }}
+      camera={{ position: [cx - 40, gy + 26, cz + 58], fov: 34, near: 0.1, far: 3000 }}>
+      <hemisphereLight args={['#ffffff', '#9fb3d6', 0.8]} />
+      <ambientLight intensity={0.25} />
+      <directionalLight position={[cx - 30, gy + 60, cz + 40]} intensity={1.6} castShadow shadow-bias={-0.0004}
+        shadow-mapSize-width={2048} shadow-mapSize-height={2048}
+        shadow-camera-left={-reach} shadow-camera-right={reach} shadow-camera-top={reach} shadow-camera-bottom={-reach}
+        shadow-camera-far={400} />
+      <directionalLight position={[cx + 50, gy + 25, cz - 40]} intensity={0.45} color="#ffd9b8" />
+      <Suspense fallback={null}>
+        <Bounds key={`showcase-${lod}`} fit clip margin={1.22}>
+          <group>
+            {visible.map(element => isOpening(element) ? (
+              <Opening key={element.element_id} element={element} lod={lod} selected={false} onSelect={noop}
+                inward={lod === '500' && element.is_external ? centres[element.storey.placement_id] : undefined}
+                hostColor={lod !== '500' ? CONCRETE
+                  : (wallFinish(element.host_component ?? '',
+                      element.is_external ?? /brick|exterior|external/i.test(element.host_component ?? '')) ?? REAL.brick)} />
+            ) : (
+              <Wall key={element.element_id} element={element} lod={lod} selected={false} onSelect={noop}
+                showLabel={false} look="realistic"
+                inward={lod === '500' && element.is_external ? centres[element.storey.placement_id] : undefined} />
+            ))}
+            {(data.slabs ?? []).filter(slab => Number(lod) >= slab.lod.minimum_lod).map(slab => (
+              <Slab key={slab.element_id} slab={slab} opacity={lod === '200' ? 0.8 : 0.4}
+                finish={lod === '500' ? slab.role ?? 'floor' : undefined} />
+            ))}
+          </group>
+        </Bounds>
+        <ContactShadows position={[cx, gy + 0.01, cz]} scale={ground.size * 2.2 + 10} blur={2.4} far={20}
+          opacity={0.55} frames={1} resolution={1024} color="#020817" />
+      </Suspense>
+      <OrbitControls makeDefault autoRotate={!calm} autoRotateSpeed={0.8} enableDamping dampingFactor={0.08}
+        enableZoom={false} enablePan={false} minPolarAngle={Math.PI * 0.18} maxPolarAngle={Math.PI * 0.46} />
+    </Canvas>
+  );
+}
+
 function BuildingView({ projectId }: { projectId: string }) {
   const [data, setData] = useState<BuildingResponse | null>(null);
   const [error, setError] = useState('');
@@ -1399,7 +1511,8 @@ function BuildingView({ projectId }: { projectId: string }) {
       setGenerating(false);
     }
   }
-  const [lod, setLod] = useState<LOD>('300');
+  // A project opens on its finished look (LOD 500); the simpler levels are one click away.
+  const [lod, setLod] = useState<LOD>('500');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [colorBy, setColorBy] = useState<Look>('realistic');
@@ -1463,6 +1576,8 @@ function BuildingView({ projectId }: { projectId: string }) {
     return next;
   });
 
+  // A Generate run is in progress and the server sent the model built before it (reloaded when the run ends).
+  const [updating, setUpdating] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setData(null);
@@ -1471,7 +1586,10 @@ function BuildingView({ projectId }: { projectId: string }) {
       .then(async response => {
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(formatDetail(body?.detail) || `Request failed (${response.status})`);
-        if (!cancelled) setData(body as BuildingResponse);
+        if (!cancelled) {
+          setUpdating(response.headers.get('X-Model-Updating') === '1');
+          setData(body as BuildingResponse);
+        }
       })
       .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load the building.'); });
     return () => { cancelled = true; };
@@ -1509,19 +1627,7 @@ function BuildingView({ projectId }: { projectId: string }) {
     return shown.length ? shown.reduce((a, b) => (b.base_elevation_mm > a.base_elevation_mm ? b : a)).placement_id : null;
   }, [data, hidden]);
 
-  // Plan centre of each storey (three.js units), to tell an outside wall's inner face from its outer face.
-  const storeyCentre = useMemo(() => {
-    const boxes: Record<string, number[]> = {};
-    (data?.elements ?? []).forEach(e => {
-      if (e.element_type !== 'wall' || !e.is_external) return;
-      const b = boxes[e.storey.placement_id] ?? [Infinity, Infinity, -Infinity, -Infinity];
-      e.mesh.vertices.forEach(v => { b[0] = Math.min(b[0], v[0]); b[1] = Math.min(b[1], v[1]); b[2] = Math.max(b[2], v[0]); b[3] = Math.max(b[3], v[1]); });
-      boxes[e.storey.placement_id] = b;
-    });
-    const centres: Record<string, [number, number, number]> = {};
-    Object.entries(boxes).forEach(([id, b]) => { centres[id] = toThree([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2, 0]); });
-    return centres;
-  }, [data]);
+  const storeyCentre = useMemo(() => storeyCentres(data?.elements ?? []), [data]);
   const storeyColor = useMemo(() => {
     const map: Record<string, string> = {};
     (data?.storeys ?? []).forEach((s, i) => { map[s.placement_id] = STOREY_COLORS[i % STOREY_COLORS.length]; });
@@ -1573,7 +1679,7 @@ function BuildingView({ projectId }: { projectId: string }) {
     return zs.length ? Math.min(...zs) / MM_PER_M - 0.02 : 0;
   }, [data]);
 
-  if (error) return <div className="message" style={{ color: '#fbbf24' }}>{error}</div>;
+  if (error) return <div className="message" style={{ color: 'var(--warn)' }}>{error}</div>;
   if (!data) return <div className="message">Loading building model...</div>;
 
   const selected = data.elements.find(e => e.element_id === selectedId) ?? null;
@@ -1581,168 +1687,72 @@ function BuildingView({ projectId }: { projectId: string }) {
     data.elements.filter(e => (placementId === null || e.storey.placement_id === placementId)
       && e.element_type === (columns ? 'column' : 'wall')).length;
 
+  const storeyCount = data.source?.type === 'structure' ? (data.elements.length ? 1 : 0) : data.summary.plans_in_model;
+  const doorCount = data.summary.doors ?? 0;
+  const windowCount = data.summary.windows ?? 0;
+
   return (
-    <div style={{ display: 'grid', gap: 14, color: '#cbd5e1', fontSize: 13 }}>
-      {data.source?.type !== 'structure' && (
-        <div>
-          <button className="primary" disabled={generating || data.summary.placed_plans === 0} onClick={generateAll}>
-            {generating ? 'Generating…' : 'Generate model for all placed plans'}
-          </button>
-        </div>
-      )}
-      {runReport.length > 0 && (
-        <ul style={{ margin: 0, fontSize: 12 }}>{runReport.map((line, i) => <li key={i}>{line}</li>)}</ul>
-      )}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18 }}>
-        {data.source && data.source.type === 'structure' ? (
-          <span style={{ color: '#22c55e' }}>
-            {(data.source.structure ?? 'structure').replace(/^./, c => c.toUpperCase())} built from the dimensions printed on: {data.source.files.join(', ')}
-          </span>
-        ) : data.source && (
-          <span style={{ color: '#22c55e' }}>Built from the {data.source.type.toUpperCase()} model: {data.source.files.join(', ')}</span>
-        )}
-        {data.source?.type === 'structure' ? (
-          <span>Elements: {data.elements.length}</span>
-        ) : (
-          <>
-            <span>Placed plans: {data.summary.placed_plans}</span>
-            <span>Storeys in model: {data.summary.plans_in_model}</span>
-            <span>Walls: {countFor(null, false)}</span>
-            <span>Columns: {countFor(null, true)}</span>
-            <span>Approximate slabs: {(data.slabs ?? []).length}</span>
-          </>
-        )}
-        {(data.summary.doors ?? 0) + (data.summary.windows ?? 0) > 0 && (
-          <span>Doors: {data.summary.doors ?? 0} · Windows: {data.summary.windows ?? 0}</span>
-        )}
-        {!!data.summary.rooms && <span>Rooms: {data.summary.rooms}</span>}
-        {!!data.summary.walls_joined && <span>Joined at LOD 400: {data.summary.walls_joined}</span>}
-        {!!data.summary.columns_to_review && (
-          <span style={{ color: REVIEW }} title="Isolated columns: no other column or wall within 10 m on their storey. Shown in amber at LOD 500; check them in section 05.">
-            Columns to review: {data.summary.columns_to_review}
-          </span>
-        )}
-        {!!data.summary.walls_superseded && (
-          <span title="Line-pair walls lying on a confirmed hatch wall are replaced by it.">
-            Superseded: {data.summary.walls_superseded}
-          </span>
-        )}
-        {data.source?.type !== 'structure' && (
-          <span style={{ color: data.summary.walls_withheld ? '#fbbf24' : undefined }}>
-            Withheld: {data.summary.walls_withheld}
-          </span>
-        )}
-      </div>
-      {!!data.parameters?.length && (
-        <details style={{ fontSize: 12 }}>
-          <summary style={{ cursor: 'pointer', color: '#94a3b8' }}>
-            Values read from the drawings ({data.parameters.filter(p => !p.assumed).length})
-            {data.parameters.some(p => p.assumed) && ` · ${data.parameters.filter(p => p.assumed).length} display value(s) where the drawings are silent`}
-          </summary>
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
-            <tbody>
-              {data.parameters.map((p, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid #1f2d3d' }}>
-                  <td style={{ padding: '3px 8px', color: '#cbd5e1', whiteSpace: 'nowrap' }}>{p.name}</td>
-                  <td style={{ padding: '3px 8px', color: p.assumed ? '#fbbf24' : '#f8fafc', whiteSpace: 'nowrap' }}>{String(p.value)}</td>
-                  <td style={{ padding: '3px 8px', color: '#8fa1b5' }}>{p.assumed ? `assumed — ${p.assumed}` : `“${p.text}”`}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </details>
+    <div style={{ display: 'grid', gap: 14, color: 'var(--ink-2)', fontSize: 13 }}>
+      {updating && (
+        <div className="note warn">Generate is running: showing the last model built. It reloads when the run finishes.</div>
       )}
       {data.source?.type === 'structure' && data.elements.length === 0 && (
-        <div className="message" style={{ color: '#fbbf24' }}>{data.limitations[0]}</div>
-      )}
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ color: '#94a3b8', fontSize: 12 }}>Level of detail</span>
-        {LODS.map(level => (
-          <button key={level} onClick={() => setLod(level)} style={lodButton(lod === level)}>
-            LOD {level}
-          </button>
-        ))}
-      </div>
-      <div style={noteStyle}>{data.lod_notes?.[lod] ?? LOD_NOTES[lod]}</div>
-
-      {lod === '500' && (
-        <div style={{ display: 'grid', gap: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ color: '#94a3b8', fontSize: 12 }}>Colour by</span>
-            <button onClick={() => setColorBy('realistic')} style={lodButton(colorBy === 'realistic')}>Realistic</button>
-            <button onClick={() => setColorBy('type')} style={lodButton(colorBy === 'type')}>Element type</button>
-            <button onClick={() => setColorBy('storey')} style={lodButton(colorBy === 'storey')}>Storey</button>
-            {hasRoof && (
-              <>
-                <span style={{ color: '#94a3b8', fontSize: 12, marginLeft: 12 }}>Roof</span>
-                <button onClick={() => setShowRoof(true)} style={lodButton(showRoof)}>Show</button>
-                <button onClick={() => setShowRoof(false)} style={lodButton(!showRoof)}>Hide</button>
-              </>
-            )}
-            {furnitureCount > 0 && (
-              <>
-                <span style={{ color: '#94a3b8', fontSize: 12, marginLeft: 12 }}>Furniture</span>
-                <button onClick={() => setShowFurniture(true)} style={lodButton(showFurniture)}>Show</button>
-                <button onClick={() => setShowFurniture(false)} style={lodButton(!showFurniture)}>Hide</button>
-              </>
-            )}
-            <span style={{ color: '#94a3b8', fontSize: 12, marginLeft: 12 }}>Room names</span>
-            <button onClick={() => setShowRooms(true)} style={lodButton(showRooms)}>Show</button>
-            <button onClick={() => setShowRooms(false)} style={lodButton(!showRooms)}>Hide</button>
-            {showRooms && !roofOff && (
-              <span style={{ color: '#8fa1b5', fontSize: 12 }}>
-                ({floors.length > 1 ? 'pick a floor below, or hide the roof, to see them' : 'hide the roof to see them'})
-              </span>
-            )}
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 12 }}>
-            {legend.map(item => (
-              <span key={item.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ width: 12, height: 12, borderRadius: 3, background: item.color, display: 'inline-block' }} />
-                {item.label} ({item.count})
-              </span>
-            ))}
-          </div>
-        </div>
+        <div className="note warn">{data.limitations[0]}</div>
       )}
 
       {data.elements.length === 0 ? (
-        <div className="message">
-          No 3D model yet. Upload PDF drawings, a DXF or an IFC model above and press “Generate 3D model”.
-        </div>
+        <div className="empty">No 3D model yet. Add drawings or a model file and press “Generate 3D model”.</div>
       ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ color: '#94a3b8', fontSize: 12 }}>View</span>
-          {(['overview', 'front', 'back', 'plan'] as ViewPreset[]).map(view => (
-            <button key={view} onClick={() => goTo(view)} style={lodButton(presetNonce > 0 && preset === view)}>
-              {view[0].toUpperCase() + view.slice(1)}
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="model-stats">
+            <span><strong>{storeyCount}</strong> {storeyCount === 1 ? 'floor' : 'floors'}</span>
+            <span><strong>{data.elements.length}</strong> elements</span>
+            {!!data.summary.rooms && <span><strong>{data.summary.rooms}</strong> rooms</span>}
+            {doorCount + windowCount > 0 && <span><strong>{doorCount}</strong> doors · <strong>{windowCount}</strong> windows</span>}
+            {furnitureCount > 0 && <span><strong>{furnitureCount}</strong> furniture &amp; equipment</span>}
+            {data.source && (
+              <span className="model-source">
+                {data.source.type === 'structure' ? 'from the dimensions printed on the drawings' : `from the ${data.source.type.toUpperCase()} model`}
+              </span>
+            )}
+          </div>
+          <div className="viewer-toolbar">
+            <div className="seg" role="group" aria-label="Level of detail">
+              <span className="seg-label">LOD</span>
+              {LODS.map(level => (
+                <button key={level} className={lod === level ? 'on' : ''} onClick={() => setLod(level)}>{level}</button>
+              ))}
+            </div>
+            <div className="seg" role="group" aria-label="View">
+              <span className="seg-label">View</span>
+              {(['overview', 'front', 'back', 'plan'] as ViewPreset[]).map(view => (
+                <button key={view} className={presetNonce > 0 && preset === view ? 'on' : ''} onClick={() => goTo(view)}>
+                  {view[0].toUpperCase() + view.slice(1)}
+                </button>
+              ))}
+            </div>
+            {floors.length > 1 && (
+              <div className="seg" role="group" aria-label="Floor">
+                <span className="seg-label">Floor</span>
+                <button className={pickedFloor === 'all' && showRoof ? 'on' : ''} onClick={() => pickFloor('all')}>All</button>
+                {floors.map((floor, i) => (
+                  <button key={floor.placement_id}
+                    className={pickedFloor === floor.placement_id || (i === floors.length - 1 && pickedFloor === 'all' && !showRoof) ? 'on' : ''}
+                    onClick={() => pickFloor(floor.placement_id)} title={`${floor.base_level_key} · ${floor.drawing_title ?? ''}`}>
+                    {floorName(floor)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       )}
-      {data.elements.length > 0 && floors.length > 1 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span style={{ color: '#94a3b8', fontSize: 12 }}>Floors</span>
-          <button onClick={() => pickFloor('all')} style={lodButton(pickedFloor === 'all' && showRoof)}>All</button>
-          {floors.map((floor, i) => (
-            <button key={floor.placement_id} onClick={() => pickFloor(floor.placement_id)}
-              style={lodButton(pickedFloor === floor.placement_id || (i === floors.length - 1 && pickedFloor === 'all' && !showRoof))}
-              title={`${floor.base_level_key} · ${floor.drawing_title ?? ''}`}>
-              {floorName(floor)}
-            </button>
-          ))}
-          <span style={{ color: '#8fa1b5', fontSize: 12 }}>
-            {pickedFloor === 'all' ? 'pick a floor to look inside it (the floors above are lifted off)'
-              : pickedFloor === 'custom' ? 'custom selection from the storey table' : 'floors above are lifted off'}
-          </span>
-        </div>
-      )}
+
       {data.elements.length > 0 && (
         <div style={{
-          position: 'relative', height: 600, width: '100%', overflow: 'hidden', borderRadius: 14,
-          border: '1px solid #334155',
-          background: lod === '500' ? 'radial-gradient(circle at 50% 35%, #2a2a30, #131316 75%)' : 'linear-gradient(#dfe7ef, #f4f6f8)',
+          position: 'relative', height: 600, width: '100%', overflow: 'hidden', borderRadius: 16,
+          border: '1px solid var(--line)',
+          background: lod === '500' ? 'radial-gradient(circle at 50% 26%, #ffffff 0%, #eef3fa 55%, #dbe4f1 100%)' : 'linear-gradient(#eef3fa, #fbfcfe)',
         }}>
           <HoverCard element={data.elements.find(e => e.element_id === (hoveredId ?? selectedId)) ?? null} />
           <div style={{
@@ -1872,49 +1882,9 @@ function BuildingView({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      <small style={{ color: '#8fa1b5' }}>
-        Building metres from each plan's shared reference point; heights from the annotated levels you chose.
-        Plans are aligned by translation only (same orientation assumed). Click a wall or column to inspect.
-      </small>
-
-      {data.storeys.length > 0 && (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <thead>
-            <tr>
-              {['Show', 'Plan', 'Base level', 'Storey height', 'Reference point', 'Walls', 'Columns', 'Withheld'].map(h => (
-                <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: '#94a3b8', borderBottom: '1px solid #1f2d3d' }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {data.storeys.map(storey => (
-              <tr key={storey.placement_id}>
-                <td style={cell}>
-                  <input type="checkbox" checked={!hidden.has(storey.placement_id)}
-                    onChange={() => toggleStorey(storey.placement_id)} aria-label={`Show ${storey.drawing_title}`} />
-                </td>
-                <td style={cell}>
-                  <span style={{
-                    display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6,
-                    background: storeyColor[storey.placement_id],
-                  }} />
-                  {storey.drawing_title}
-                </td>
-                <td style={cell}>{storey.base_level_key} ({elevation(storey.base_elevation_mm)})</td>
-                <td style={cell}>{storey.storey_height_mm ? mm(storey.storey_height_mm) : '—'}</td>
-                <td style={cell}>{storey.reference_label}</td>
-                <td style={cell}>{countFor(storey.placement_id, false)}</td>
-                <td style={cell}>{countFor(storey.placement_id, true)}</td>
-                <td style={cell}>{storey.walls_withheld}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
       {selected && (
         <div style={{ ...noteStyle, display: 'grid', gap: 6 }}>
-          <strong style={{ color: '#eaf0f8' }}>
+          <strong style={{ color: 'var(--ink)' }}>
             {(selected.component ?? 'wall').replace(/^./, c => c.toUpperCase())} · {selected.drawing_title}
           </strong>
           <span>
@@ -1944,35 +1914,194 @@ function BuildingView({ projectId }: { projectId: string }) {
               {selected.height_verification.verification_id}
             </span>
           )}
-          <span style={{ color: '#8fa1b5' }}>{selected.element_id}</span>
+          <span style={{ color: 'var(--muted)' }}>{selected.element_id}</span>
         </div>
       )}
 
-      {data.excluded_plans.length > 0 && (
-        <details open>
-          <summary>{data.excluded_plans.length} plan(s) not in the building yet</summary>
-          <ul>
-            {data.excluded_plans.map((item, index) => (
-              <li key={index}>{item.drawing_title ?? item.drawing_id}: {item.reason}</li>
-            ))}
-          </ul>
-        </details>
-      )}
-      {data.withheld_elements.length > 0 && (
-        <details>
-          <summary>{data.withheld_elements.length} wall(s) withheld by the height gate</summary>
-          <ul>
-            {data.withheld_elements.map((item, index) => (
-              <li key={index}>{item.element_id ?? 'unknown'}: {item.reasons.join(' ')}</li>
-            ))}
-          </ul>
-        </details>
-      )}
+      <details className="more">
+        <summary>More options and model details</summary>
+        <div className="more-body">
+          {lod === '500' && (
+            <div style={{ display: 'grid', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{ color: 'var(--muted)', fontSize: 12 }}>Colour by</span>
+                <button onClick={() => setColorBy('realistic')} style={lodButton(colorBy === 'realistic')}>Realistic</button>
+                <button onClick={() => setColorBy('type')} style={lodButton(colorBy === 'type')}>Element type</button>
+                <button onClick={() => setColorBy('storey')} style={lodButton(colorBy === 'storey')}>Storey</button>
+                {hasRoof && (
+                  <>
+                    <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Roof</span>
+                    <button onClick={() => setShowRoof(true)} style={lodButton(showRoof)}>Show</button>
+                    <button onClick={() => setShowRoof(false)} style={lodButton(!showRoof)}>Hide</button>
+                  </>
+                )}
+                {furnitureCount > 0 && (
+                  <>
+                    <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Furniture</span>
+                    <button onClick={() => setShowFurniture(true)} style={lodButton(showFurniture)}>Show</button>
+                    <button onClick={() => setShowFurniture(false)} style={lodButton(!showFurniture)}>Hide</button>
+                  </>
+                )}
+                <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Room names</span>
+                <button onClick={() => setShowRooms(true)} style={lodButton(showRooms)}>Show</button>
+                <button onClick={() => setShowRooms(false)} style={lodButton(!showRooms)}>Hide</button>
+                {showRooms && !roofOff && (
+                  <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+                    ({floors.length > 1 ? 'pick a floor below, or hide the roof, to see them' : 'hide the roof to see them'})
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 12 }}>
+                {legend.map(item => (
+                  <span key={item.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ width: 12, height: 12, borderRadius: 3, background: item.color, display: 'inline-block' }} />
+                    {item.label} ({item.count})
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          <div style={noteStyle}>{data.lod_notes?.[lod] ?? LOD_NOTES[lod]}</div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18 }}>
+            {data.source && data.source.type === 'structure' ? (
+              <span style={{ color: data.source.files.length ? 'var(--ok)' : 'var(--warn)' }}>
+                {(data.source.structure ?? 'structure').replace(/^./, c => c.toUpperCase())}
+                {data.source.files.length
+                  ? ` built from the dimensions printed on: ${data.source.files.join(', ')}`
+                  : ' project: no drawings uploaded yet'}
+              </span>
+            ) : data.source && (
+              <span style={{ color: 'var(--ok)' }}>Built from the {data.source.type.toUpperCase()} model: {data.source.files.join(', ')}</span>
+            )}
+            {data.source?.type === 'structure' ? (
+              <span>Elements: {data.elements.length}</span>
+            ) : (
+              <>
+                <span>Placed plans: {data.summary.placed_plans}</span>
+                <span>Storeys in model: {data.summary.plans_in_model}</span>
+                <span>Walls: {countFor(null, false)}</span>
+                <span>Columns: {countFor(null, true)}</span>
+                <span>Approximate slabs: {(data.slabs ?? []).length}</span>
+              </>
+            )}
+            {(data.summary.doors ?? 0) + (data.summary.windows ?? 0) > 0 && (
+              <span>Doors: {data.summary.doors ?? 0} · Windows: {data.summary.windows ?? 0}</span>
+            )}
+            {!!data.summary.rooms && <span>Rooms: {data.summary.rooms}</span>}
+            {!!data.summary.walls_joined && <span>Joined at LOD 400: {data.summary.walls_joined}</span>}
+            {!!data.summary.columns_to_review && (
+              <span style={{ color: REVIEW }} title="Isolated columns: no other column or wall within 10 m on their storey. Shown in amber at LOD 500; check them in section 05.">
+                Columns to review: {data.summary.columns_to_review}
+              </span>
+            )}
+            {!!data.summary.walls_superseded && (
+              <span title="Line-pair walls lying on a confirmed hatch wall are replaced by it.">
+                Superseded: {data.summary.walls_superseded}
+              </span>
+            )}
+            {data.source?.type !== 'structure' && (
+              <span style={{ color: data.summary.walls_withheld ? 'var(--warn)' : undefined }}>
+                Withheld: {data.summary.walls_withheld}
+              </span>
+            )}
+          </div>
+          {!!data.parameters?.length && (
+            <details style={{ fontSize: 12 }}>
+              <summary style={{ cursor: 'pointer', color: 'var(--muted)' }}>
+                Values read from the drawings ({data.parameters.filter(p => !p.assumed).length})
+                {data.parameters.some(p => p.assumed) && ` · ${data.parameters.filter(p => p.assumed).length} display value(s) where the drawings are silent`}
+              </summary>
+              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
+                <tbody>
+                  {data.parameters.map((p, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--line)' }}>
+                      <td style={{ padding: '3px 8px', color: 'var(--ink-2)', whiteSpace: 'nowrap' }}>{p.name}</td>
+                      <td style={{ padding: '3px 8px', color: p.assumed ? 'var(--warn)' : 'var(--ink)', whiteSpace: 'nowrap' }}>{String(p.value)}</td>
+                      <td style={{ padding: '3px 8px', color: 'var(--muted)' }}>{p.assumed ? `assumed — ${p.assumed}` : `“${p.text}”`}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          )}
+          {data.source?.type !== 'structure' && (
+            <div>
+              <button className="primary" disabled={generating || data.summary.placed_plans === 0} onClick={generateAll}>
+                {generating ? 'Generating…' : 'Generate model for all placed plans'}
+              </button>
+            </div>
+          )}
+          {runReport.length > 0 && (
+            <ul style={{ margin: 0, fontSize: 12 }}>{runReport.map((line, i) => <li key={i}>{line}</li>)}</ul>
+          )}
+          <small style={{ color: 'var(--muted)' }}>
+            Building metres from each plan's shared reference point; heights from the annotated levels you chose.
+            Plans are aligned by translation only (same orientation assumed). Click a wall or column to inspect.
+          </small>
+
+          {data.storeys.length > 0 && (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {['Show', 'Plan', 'Base level', 'Storey height', 'Reference point', 'Walls', 'Columns', 'Withheld'].map(h => (
+                    <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: 'var(--muted)', borderBottom: '1px solid var(--line)' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {data.storeys.map(storey => (
+                  <tr key={storey.placement_id}>
+                    <td style={cell}>
+                      <input type="checkbox" checked={!hidden.has(storey.placement_id)}
+                        onChange={() => toggleStorey(storey.placement_id)} aria-label={`Show ${storey.drawing_title}`} />
+                    </td>
+                    <td style={cell}>
+                      <span style={{
+                        display: 'inline-block', width: 10, height: 10, borderRadius: 2, marginRight: 6,
+                        background: storeyColor[storey.placement_id],
+                      }} />
+                      {storey.drawing_title}
+                    </td>
+                    <td style={cell}>{storey.base_level_key} ({elevation(storey.base_elevation_mm)})</td>
+                    <td style={cell}>{storey.storey_height_mm ? mm(storey.storey_height_mm) : '—'}</td>
+                    <td style={cell}>{storey.reference_label}</td>
+                    <td style={cell}>{countFor(storey.placement_id, false)}</td>
+                    <td style={cell}>{countFor(storey.placement_id, true)}</td>
+                    <td style={cell}>{storey.walls_withheld}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {data.excluded_plans.length > 0 && (
+            <details open>
+              <summary>{data.excluded_plans.length} plan(s) not in the building yet</summary>
+              <ul>
+                {data.excluded_plans.map((item, index) => (
+                  <li key={index}>{item.drawing_title ?? item.drawing_id}: {item.reason}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {data.withheld_elements.length > 0 && (
+            <details>
+              <summary>{data.withheld_elements.length} wall(s) withheld by the height gate</summary>
+              <ul>
+                {data.withheld_elements.map((item, index) => (
+                  <li key={index}>{item.element_id ?? 'unknown'}: {item.reasons.join(' ')}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
 
-const cell: React.CSSProperties = { padding: '6px 8px', borderBottom: '1px solid #1f2d3d' };
+const cell: React.CSSProperties = { padding: '6px 8px', borderBottom: '1px solid var(--line)' };
 
 export default function ModelViewer3D({
   projectId,
@@ -1989,7 +2118,7 @@ export default function ModelViewer3D({
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ color: '#94a3b8', fontSize: 12 }}>Show</span>
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>Show</span>
         <button onClick={() => setScope('building')} style={lodButton(scope === 'building')}>
           Whole building
         </button>

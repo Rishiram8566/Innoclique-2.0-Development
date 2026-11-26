@@ -183,6 +183,64 @@ def _extract_all(jobs: list[tuple[str, str, str | None, str | None]]) -> list[di
     return [_extract_one(job) for job in jobs]
 
 
+METADATA_INDEX_NAME = "drawing_geometry_stage5_metadata_index.json"    # written by scale_calibration
+FAILURES_INDEX_NAME = "drawing_geometry_stage5_failures.json"
+
+
+def _current_companion(target: Path, name: str) -> dict | None:
+    """A small file kept next to the geometry artifact, if it was made from the artifact as it is now."""
+    try:
+        stat = target.stat()
+        cached = json.loads((target.parent / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (isinstance(cached, dict) and cached.get("source_size_bytes") == stat.st_size
+            and cached.get("source_mtime_ns") == stat.st_mtime_ns):
+        return cached
+    return None
+
+
+def _drawing_metadata(target: Path) -> Iterator[dict]:
+    """
+    Each drawing's id, hash and summary. The artifact can be gigabytes (minutes to read through), so the small
+    metadata index is used while it matches the artifact.
+    """
+    index = _current_companion(target, METADATA_INDEX_NAME)
+    if index is None or not isinstance(index.get("drawings"), list):
+        yield from _iter_drawing_metadata(target)
+        return
+    for item in index["drawings"]:
+        source = item.get("source")
+        nested = source.get("sha256") if isinstance(source, dict) else None
+        yield {
+            "drawing_id": item.get("drawing_id"),
+            "source_sha256": item.get("source_sha256") or nested,
+            # Only an older extractor wrote the hash inside "source" alone.
+            "legacy_record": not item.get("source_sha256") and bool(nested),
+            "summary": item.get("summary") or {},
+        }
+
+
+def _save_failures(target: Path, failed: list[dict]) -> None:
+    """The artifact's failure list in a small file, so the next run need not read the whole artifact for it."""
+    try:
+        stat = target.stat()
+        (target.parent / FAILURES_INDEX_NAME).write_text(json.dumps(
+            {"source_size_bytes": stat.st_size, "source_mtime_ns": stat.st_mtime_ns, "failed": failed},
+            default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _previous_failures(target: Path) -> list[dict]:
+    saved = _current_companion(target, FAILURES_INDEX_NAME)
+    if saved is not None and isinstance(saved.get("failed"), list):
+        return saved["failed"]
+    failed = list(_iter_array_items(target, "failed.item"))
+    _save_failures(target, failed)
+    return failed
+
+
 def _previous_indexes(
     target: Path,
 ) -> tuple[dict[str, str], dict[str, dict]]:
@@ -193,7 +251,7 @@ def _previous_indexes(
     if not target.is_file():
         return drawing_hashes, failures
 
-    for item in _iter_drawing_metadata(target):
+    for item in _drawing_metadata(target):
         drawing_id = str(item.get("drawing_id") or "")
 
         if drawing_id:
@@ -202,7 +260,7 @@ def _previous_indexes(
                 item.get("source_sha256") or ""
             )
 
-    for item in _iter_array_items(target, "failed.item"):
+    for item in _previous_failures(target):
         drawing_id = str(
             item.get("drawing_id") or item.get("filename") or ""
         )
@@ -264,7 +322,7 @@ def _report_summary(
     processed_ids: set[str] = set()
 
     # Keep previous successful geometry unless it was successfully replaced.
-    for item in _iter_drawing_metadata(previous_path):
+    for item in (_drawing_metadata(previous_path) if previous_path.is_file() else ()):
         drawing_id = str(item.get("drawing_id") or "")
 
         if not drawing_id or drawing_id in replaced_ids:
@@ -340,6 +398,7 @@ def extract_project_geometry(
 
     _remove_stale_temp_files(artifacts_dir)
     drawing_hashes, cached_failures = _previous_indexes(target)
+    previous_failures = dict(cached_failures)
 
     records = project.get("drawings", [])
 
@@ -569,7 +628,11 @@ def extract_project_geometry(
             ],
         }
 
-        write_json_atomic(target, report)
+        # Nothing extracted in this call and no failure changed: the artifact on disk already holds these
+        # drawings, and rewriting it would copy every drawing's geometry (gigabytes, many minutes) for nothing.
+        if jobs or not target.is_file() or failed_by_id != previous_failures:
+            write_json_atomic(target, report)
+            _save_failures(target, failed)
 
         return {
             "schema_version": report["schema_version"],

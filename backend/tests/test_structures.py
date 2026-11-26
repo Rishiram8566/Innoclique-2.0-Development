@@ -112,3 +112,10 @@ def test_structure_projects_skip_the_floor_plan_pipeline(tmp_path):
     model = building_model.build_building_model(tmp_path, "p")
     assert model["artifact_type"] == "structure_model" and model["source"]["structure"] == "cell tower"
     assert model["lod_notes"]["100"].startswith("LOD 100") and len(model["elements"]) > 10
+
+
+def test_empty_structure_project_says_nothing_was_uploaded(tmp_path):
+    (tmp_path / "project.json").write_text(json.dumps({"name": "Dam", "project_type": "water_dam", "drawings": []}), "utf-8")
+    model = building_model.build_building_model(tmp_path, "p")
+    assert model["source"] == {"type": "structure", "structure": "water dam", "files": []}
+    assert model["elements"] == [] and model["limitations"][0].startswith("No drawings uploaded to this project yet")

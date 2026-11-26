@@ -179,6 +179,9 @@ def revoke_placement(project_id: str, placement_id: str, payload: RevokeRequest)
 def get_building_model(project_id: str):
     safe, folder = _folder(project_id)
     try:
-        return Response(content=building_model.cached_building_model_json(folder, safe), media_type="application/json")
+        body, before_run = building_model.viewer_model_json(folder, safe)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # X-Model-Updating: a Generate run is in progress and this is the last model built.
+    return Response(content=body, media_type="application/json",
+                    headers={"X-Model-Updating": "1"} if before_run else None)

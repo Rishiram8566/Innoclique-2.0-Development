@@ -29,8 +29,9 @@ def build(folder: Path, project: dict[str, Any], project_id: str) -> dict[str, A
     drawing = {"id": first.get("id"), "title": first.get("filename")}
     if not lines:
         storey = sc.structure_storey(drawing["title"], drawing["id"], 0.0, 0.0, "ground")
-        return sc.model(project_id, sc.STRUCTURE_TYPES.get(kind, kind), storey, [], facts, {},
-                        ["No text could be read from the uploaded PDFs (scanned drawings need OCR)."], files)
+        why = ("No text could be read from the uploaded PDFs (scanned drawings need OCR)." if files else
+               "No drawings uploaded to this project yet: upload its PDF drawings, then press Generate 3D model.")
+        return sc.model(project_id, sc.STRUCTURE_TYPES.get(kind, kind), storey, [], facts, {}, [why], files)
     if kind == "telecom_tower":
         from app.services import tower_model
         model = tower_model.build(project_id, facts, files, drawing)

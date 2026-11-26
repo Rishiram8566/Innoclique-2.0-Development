@@ -495,6 +495,12 @@ def nothing_built_reason(plans: list[dict[str, Any]], drawing_count: int) -> str
             "lines and its slab levels; the DWG or IFC files give the model directly.")
 
 
+def is_running(project_id: str) -> bool:
+    """A Generate run is in progress for the project in this server."""
+    with _RUNNING_LOCK:
+        return project_id in _RUNNING
+
+
 def start(folder: Path, project_id: str) -> dict[str, Any]:
     """Run in a background thread; returns the initial status. Raises RuntimeError if already running."""
     with _RUNNING_LOCK:

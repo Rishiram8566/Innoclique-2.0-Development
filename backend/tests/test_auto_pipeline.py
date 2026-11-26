@@ -121,3 +121,61 @@ def test_geometry_from_the_older_extractor_is_extracted_again(tmp_path):
     hashes, _ = _previous_indexes(target)
     # Older records (hash only under "source", or a page cut at the old 50,000 limit) no longer match their PDF.
     assert hashes == {"old": "", "new": "bbb", "new2": "ccc", "capped": ""}
+
+
+def test_viewer_keeps_the_model_from_before_a_run_while_it_runs(tmp_path, monkeypatch):
+    """While Generate runs, the files keep changing: the viewer gets the model built before the run, marked."""
+    import json as _json
+
+    from app.services import auto_pipeline
+    from app.services import building_model
+
+    (tmp_path / "project.json").write_text(_json.dumps({"name": "Dam", "project_type": "water_dam", "drawings": []}), "utf-8")
+    pid = "viewer-run-test"
+    body, before_run = building_model.viewer_model_json(tmp_path, pid)
+    assert not before_run and _json.loads(body)["artifact_type"] == "structure_model"
+    monkeypatch.setattr(auto_pipeline, "_RUNNING", {pid})
+    (tmp_path / "progress.txt").write_text("a run is writing files", "utf-8")
+    again, before_run = building_model.viewer_model_json(tmp_path, pid)
+    assert before_run and again == body
+    monkeypatch.setattr(auto_pipeline, "_RUNNING", set())
+    assert building_model.viewer_model_json(tmp_path, pid)[1] is False
+
+
+def test_a_rerun_with_nothing_new_neither_reads_nor_rewrites_the_geometry(tmp_path, monkeypatch):
+    """A large project's geometry is gigabytes: a re-run with no changed PDF uses the small index files only."""
+    import json
+
+    import fitz
+
+    from app.services import geometry_pipeline as gp
+
+    (tmp_path / "drawings").mkdir()
+    doc = fitz.open()
+    page = doc.new_page()
+    page.draw_line((50, 50), (300, 50))
+    page.draw_rect(fitz.Rect(60, 80, 200, 160))
+    page.insert_text((60, 200), "GROUND FLOOR PLAN")
+    doc.save(tmp_path / "drawings" / "a.pdf")
+    project = {"id": "p", "name": "t", "drawings": [{"id": "d1", "filename": "a.pdf", "stored_filename": "a.pdf"}]}
+
+    first = gp.extract_project_geometry(tmp_path, project, batch_size=5)
+    assert first["summary"]["extracted_count"] == 1 and first["summary"]["remaining_count"] == 0
+    target = tmp_path / "artifacts" / "drawing_geometry_stage5.json"
+    stat = target.stat()
+    # The metadata index as scale_calibration writes it after a run.
+    record = next(gp._iter_drawing_metadata(target))
+    (target.parent / gp.METADATA_INDEX_NAME).write_text(json.dumps({
+        "source_size_bytes": stat.st_size, "source_mtime_ns": stat.st_mtime_ns,
+        "drawings": [{"drawing_id": "d1", "source_sha256": record["source_sha256"], "summary": record["summary"]}],
+    }), "utf-8")
+
+    def no_big_read(*_args, **_kwargs):
+        raise AssertionError("read the whole geometry artifact")
+
+    monkeypatch.setattr(gp, "_iter_drawing_metadata", no_big_read)
+    monkeypatch.setattr(gp, "_iter_array_items", no_big_read)
+    again = gp.extract_project_geometry(tmp_path, project, batch_size=5)
+    assert again["summary"]["extracted_count"] == 1 and again["summary"]["remaining_count"] == 0
+    assert again["summary"]["newly_processed_count"] == 0
+    assert target.stat().st_mtime_ns == stat.st_mtime_ns          # not rewritten
