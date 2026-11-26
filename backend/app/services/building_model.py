@@ -695,6 +695,31 @@ def _outside(mask: list[list[bool]]) -> list[list[bool]]:
     return seen
 
 
+SLANT_PIECE_MM = 1000.0
+
+
+def _split_in_zone(r, zone, piece: float):
+    """A rectangle cut at a zone's edges; the part inside the zone is cut further into pieces of at most `piece`."""
+    x0, y0, x1, y1 = r
+    zx0, zy0, zx1, zy1 = zone
+    if x1 <= zx0 or x0 >= zx1 or y1 <= zy0 or y0 >= zy1:
+        return [r]
+    xs = sorted({x0, x1, *(v for v in (zx0, zx1) if x0 < v < x1)})
+    ys = sorted({y0, y1, *(v for v in (zy0, zy1) if y0 < v < y1)})
+    out = []
+    for a, b in zip(xs, xs[1:]):
+        for c, e in zip(ys, ys[1:]):
+            inside = a >= zx0 and b <= zx1 and c >= zy0 and e <= zy1
+            if not inside:
+                out.append((a, c, b, e))
+                continue
+            nx = max(1, int(-(-(b - a) // piece))); ny = max(1, int(-(-(e - c) // piece)))
+            for i in range(nx):
+                for j in range(ny):
+                    out.append((a + (b - a) * i / nx, c + (e - c) * j / ny, a + (b - a) * (i + 1) / nx, c + (e - c) * (j + 1) / ny))
+    return out
+
+
 def _clip_half_plane(poly: list[tuple[float, float]], a: tuple[float, float], n: tuple[float, float]):
     """The part of a convex polygon on the side of the line through a where (p - a) . n >= 0."""
     out = []
@@ -750,14 +775,23 @@ def trim_slabs_to_slanted_walls(slabs: list[dict[str, Any]], elements: list[dict
             n = (-d[1], d[0])
             if (centre[0] - a[0]) * n[0] + (centre[1] - a[1]) * n[1] < 0:
                 n = (-n[0], -n[1])
-            faces.append((a, d, n, length))
+            xs = [q[0] for q in ring]; ys = [q[1] for q in ring]
+            zone = (min(xs) - 1500.0, min(ys) - 1500.0, max(xs) + 1500.0, max(ys) + 1500.0)
+            faces.append((a, d, n, length, zone))
         if not faces:
             continue
+        # A cell may be a long strip reaching from far away into a slanted wall's area: inside each wall's area
+        # it is cut into pieces of at most PIECE_MM, so every piece near the wall is judged by where it is.
+        pieces = [tuple(r) for r in rects]
+        for *_, zone in faces:
+            pieces = [q for r in pieces for q in _split_in_zone(r, zone, SLANT_PIECE_MM)]
         polygons, trimmed = [], 0
-        for r in rects:
+        for r in pieces:
             poly = [(r[0], r[1]), (r[2], r[1]), (r[2], r[3]), (r[0], r[3])]
             mx, my = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
-            for a, d, n, length in faces:
+            for a, d, n, length, zone in faces:
+                if not (zone[0] <= mx <= zone[2] and zone[1] <= my <= zone[3]):
+                    continue
                 along = (mx - a[0]) * d[0] + (my - a[1]) * d[1]
                 across = (mx - a[0]) * n[0] + (my - a[1]) * n[1]
                 if -1500.0 <= along <= length + 1500.0 and across < 2000.0:

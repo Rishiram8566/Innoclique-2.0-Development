@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Canvas, useLoader, useThree } from '@react-three/fiber';
 import { Bounds, ContactShadows, Html, OrbitControls, useBounds } from '@react-three/drei';
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 const API = 'http://127.0.0.1:8000/api';
 const PAGE_NUMBER = 1;
@@ -1267,17 +1268,16 @@ function SlabBand({ slab, finish }: { slab: SlabData; finish: 'floor' | 'ceiling
       g.translate(0, top, 0);
       return g;
     });
-    return geometries;
+    // One mesh for the whole slab: a slab cut along slanted walls has a thousand or more pieces.
+    const merged = mergeGeometries(geometries, false);
+    geometries.forEach(g => g.dispose());
+    return merged;
   }, [slab, t, top]);
   if (cut) {
     return (
-      <group>
-        {cut.map((geometry, i) => (
-          <mesh key={i} geometry={geometry} castShadow receiveShadow>
-            <meshStandardMaterial color={finish === 'floor' ? REAL.floor : REAL.ceiling} roughness={0.9} />
-          </mesh>
-        ))}
-      </group>
+      <mesh geometry={cut} castShadow receiveShadow>
+        <meshStandardMaterial color={finish === 'floor' ? REAL.floor : REAL.ceiling} roughness={0.9} />
+      </mesh>
     );
   }
   return (
