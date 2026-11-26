@@ -1839,12 +1839,13 @@ function BuildingView({ projectId }: { projectId: string }) {
         <div style={{
           position: 'relative', height: 600, width: '100%', overflow: 'hidden', borderRadius: 16,
           border: '1px solid var(--line)',
-          background: lod === '500' ? 'radial-gradient(circle at 50% 26%, #ffffff 0%, #eef3fa 55%, #dbe4f1 100%)' : 'linear-gradient(#eef3fa, #fbfcfe)',
+          // A soft dark studio backdrop (slate blue), so the building, its finishes and its labels stand out.
+          background: 'radial-gradient(circle at 50% 28%, #2c384c 0%, #18202f 52%, #0b101a 100%)',
         }}>
           <HoverCard element={data.elements.find(e => e.element_id === (hoveredId ?? selectedId)) ?? null} />
           <div style={{
             position: 'absolute', right: 14, bottom: 10, zIndex: 1, pointerEvents: 'none', fontSize: 11,
-            fontFamily: 'ui-monospace, monospace', color: lod === '500' ? '#8b8b93' : '#64748b',
+            fontFamily: 'ui-monospace, monospace', color: '#9aa6b8',
           }}>
             {roomView ? 'drag to look around 360° · scroll to widen or narrow the view · Esc to leave'
               : `drag orbit · scroll zoom · right-drag pan · double-click to centre${lod === '500' ? ' · click a room name to walk in' : ''}`}
@@ -1961,7 +1962,7 @@ function BuildingView({ projectId }: { projectId: string }) {
                 </group>
                 </FacadeContext.Provider>
               </Bounds>
-              {lod !== '500' && <gridHelper args={[300, 60, '#b6c2cf', '#dbe2ea']} position={[30, groundY, 40]} />}
+              {lod !== '500' && <gridHelper args={[300, 60, '#4b596f', '#2a3445']} position={[30, groundY, 40]} />}
               <ContactShadows position={[30, groundY + 0.01, 40]} scale={200} blur={2.5} far={40}
                 opacity={lod === '500' ? 0.6 : 0.35} frames={1} resolution={1024} />
             </Suspense>
