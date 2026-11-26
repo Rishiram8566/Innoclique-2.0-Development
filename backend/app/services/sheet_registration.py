@@ -34,6 +34,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services import height_verification_ledger as ledger_service
+from app.services import drawing_text_facts
 from app.services import scale_calibration
 
 router = APIRouter(tags=["Sheet registration"])
@@ -46,6 +47,7 @@ MAX_LABEL_SIZE_PT = 20.0
 MATCH_TOLERANCE_PT = 1.0
 MIN_MATCHED_LABELS = 8
 UNIT_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0}
+WALL_LEGEND_TEXT = re.compile(r"\bWALLS?\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +56,7 @@ UNIT_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0}
 
 def build_sheet_index(evidence: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     index: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"labels": defaultdict(list), "scales": set(), "wall_thickness_mm": []}
+        lambda: {"labels": defaultdict(list), "scales": set(), "wall_thickness_mm": [], "wall_legend_labels": [], "titled_scales": set()}
     )
     for record in evidence:
         if not isinstance(record, dict):
@@ -67,11 +69,21 @@ def build_sheet_index(evidence: list[dict[str, Any]]) -> dict[str, dict[str, Any
         entry = index[drawing_id]
         for scale in SCALE_TEXT.findall(text):
             entry["scales"].add(f"1:{scale}")
+            if "SCALE" in text.upper():
+                entry["titled_scales"].add(f"1:{scale}")   # printed beside the word SCALE (title block)
         if (
             GRID_LABEL.match(text) and isinstance(bbox, (list, tuple)) and len(bbox) == 4
             and abs(bbox[2] - bbox[0]) <= MAX_LABEL_SIZE_PT and abs(bbox[3] - bbox[1]) <= MAX_LABEL_SIZE_PT
         ):
             entry["labels"][text].append(((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2))
+        if (
+            WALL_LEGEND_TEXT.search(text) and len(text) <= 80
+            and isinstance(bbox, (list, tuple)) and len(bbox) == 4
+        ):
+            # Candidate hatch-legend entries ("250mm THERMAL INSULATED BLOCK WALL"); the swatch beside
+            # the text decides whether it really is a legend row (hatch_wall_detection).
+            entry["wall_legend_labels"].append((text, [float(v) for v in bbox]))
+        drawing_text_facts.collect(entry, text, bbox)
         if "possible_wall_thickness" in (record.get("categories") or []):
             value = record.get("numeric_value") or {}
             values, unit = value.get("values") or [], value.get("unit")

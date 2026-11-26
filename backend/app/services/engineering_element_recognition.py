@@ -1568,9 +1568,9 @@ def analyze_project_elements(
 
 ) -> dict:
 
-    if not isinstance(batch_size, int) or not 1 <= batch_size <= 5:
+    if not isinstance(batch_size, int) or not 1 <= batch_size <= 25:
 
-        raise ValueError("batch_size must be between 1 and 5")
+        raise ValueError("batch_size must be between 1 and 25")
 
 
 

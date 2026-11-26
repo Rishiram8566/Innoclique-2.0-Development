@@ -242,9 +242,14 @@ def test_building_model_stacks_storeys_at_their_levels(project):
     assert model["summary"]["walls_served"] == 2
     assert [s["base_level_key"] for s in model["storeys"]] == ["SSL@-7600mm", "SSL@-3400mm"]
 
-    by_drawing = {e["drawing_id"]: e for e in model["elements"]}
+    by_drawing = {e["drawing_id"]: e for e in model["elements"] if e["element_type"] != "parapet"}
     lower = by_drawing[LOWER]["mesh"]["vertices"]
     upper = by_drawing[UPPER]["mesh"]["vertices"]
+    # The top plan prints "PARAPET 1.2M HIGH": a LOD 500 parapet stands on its outer wall, roof level up.
+    parapets = [e for e in model["elements"] if e["element_type"] == "parapet"]
+    assert model["summary"]["parapets"] == len(parapets) == 1
+    assert {v[2] for v in parapets[0]["mesh"]["vertices"]} == {450.0, 1650.0}
+    assert parapets[0]["lod"]["minimum_lod"] == 500
     # Lower plan: reference (100, 100) pt -> (1000, 1000) mm; wall x 1000-2000, y 1000-1070.
     assert {v[0] for v in lower} == {0.0, 1000.0} and {v[1] for v in lower} == {0.0, 70.0}
     assert {v[2] for v in lower} == {-7600.0, -3400.0}
@@ -291,7 +296,9 @@ def test_placement_routes(project):
     placement_router.revoke_placement(PROJECT, placement_id, placement_router.RevokeRequest(
         reviewer="Test Reviewer", reason="Testing the revoke route end to end."))
     assert placement_router.get_placement_options(PROJECT, drawing_id=LOWER, page_number=1)["active_placement"] is None
-    assert placement_router.get_building_model(PROJECT)["summary"]["placed_plans"] == 0
+    response = placement_router.get_building_model(PROJECT)          # JSON bytes, built once per project version
+    assert response.media_type == "application/json"
+    assert json.loads(response.body)["summary"]["placed_plans"] == 0
 
     with pytest.raises(HTTPException) as missing:
         placement_router.get_building_model("44444444-4444-4444-8444-444444444444")

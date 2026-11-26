@@ -39,7 +39,7 @@ def write_page(drawing, page_meta):
     expected = int(page_meta["vector_primitive_count"])
 
     source_name = drawing["source"]["stored_file_name"]
-    expected_pdf_hash = drawing["source_sha256"]
+    expected_pdf_hash = drawing.get("source_sha256") or (drawing.get("source") or {}).get("sha256")
 
     pdf_path = DRAWINGS / source_name
 

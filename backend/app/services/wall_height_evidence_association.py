@@ -72,6 +72,13 @@ LEVEL_VALUE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# "ALL LEVELS ARE IN METRES", "LEVELS IN MM", "ALL LEVELS SHOWN IN METERS"
+LEVEL_UNIT_NOTE_PATTERN = re.compile(
+    r"\bLEVELS?\s+(?:ARE\s+)?(?:SHOWN\s+|GIVEN\s+|EXPRESSED\s+)?IN\s+"
+    r"(?P<unit>METRES|METERS|METRE|METER|MILLIMETRES|MILLIMETERS|MM|M)\b",
+    re.IGNORECASE,
+)
+
 LEVEL_LABEL_ONLY_PATTERN = re.compile(
     rf"(?<![A-Z])(?:{_LEVEL_LABEL})(?![A-Z])",
     re.IGNORECASE,
@@ -422,20 +429,57 @@ def _validate_source_report(report: Any) -> tuple[str, list[dict[str, Any]]]:
     return project_id, evidence
 
 
+def parse_level_unit_note(text: str) -> str | None:
+    """Unit stated by a drawing note such as "ALL LEVELS ARE IN METRES", else None."""
+    match = LEVEL_UNIT_NOTE_PATTERN.search(text or "")
+    if not match:
+        return None
+    word = match.group("unit").lower()
+    return "mm" if word.startswith("mil") or word == "mm" else "m"
+
+
 def _resolve_level_unit(
     parsed_levels: list[tuple[dict[str, Any], dict[str, Any]]],
+    unit_notes: list[tuple[dict[str, Any], str]] | None = None,
 ) -> dict[str, Any]:
     """
     Resolve the unit for level values printed without one.
 
     A unit is adopted only when the project's own level annotations print
-    exactly one explicit unit. Otherwise unstated values stay unresolved.
+    exactly one explicit unit, or - when they print none - when the drawings'
+    notes state exactly one level unit ("ALL LEVELS ARE IN METRES"). A note
+    that disagrees with the annotations leaves the unit unresolved.
     """
 
     explicit = defaultdict(list)
     for record, level in parsed_levels:
         if level["value_status"] == "parsed" and level["unit"]:
             explicit[level["unit"]].append(record.get("evidence_id"))
+    noted = defaultdict(list)
+    for record, unit in unit_notes or []:
+        noted[unit].append(record.get("evidence_id"))
+
+    if len(noted) > 1 or (noted and explicit and set(noted) != set(explicit)):
+        return {
+            "status": "unresolved",
+            "unit": None,
+            "explicit_units_found": {k: len(v) for k, v in explicit.items()},
+            "noted_units_found": {k: len(v) for k, v in noted.items()},
+            "note": "The drawings' notes and level annotations state different level units; not converted.",
+        }
+
+    if not explicit and len(noted) == 1:
+        unit, evidence_ids = next(iter(noted.items()))
+        return {
+            "status": "resolved_from_drawing_note",
+            "unit": unit,
+            "explicit_occurrence_count": 0,
+            "basis_evidence_ids": sorted(set(evidence_ids))[:25],
+            "note": (
+                "Level values printed without a unit adopt the unit stated by the "
+                "drawings' own note (e.g. 'ALL LEVELS ARE IN METRES'). Requires verification."
+            ),
+        }
 
     if len(explicit) == 1:
         unit, evidence_ids = next(iter(explicit.items()))
@@ -484,6 +528,7 @@ def build_height_association_report(
     labels_without_value = 0
     abbreviation_hits: list[tuple[dict[str, Any], dict[str, str]]] = []
     height_hits: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    unit_notes: list[tuple[dict[str, Any], str]] = []
 
     for record in evidence:
         if not isinstance(record, dict):
@@ -496,6 +541,10 @@ def build_height_association_report(
             continue
 
         scanned += 1
+
+        noted_unit = parse_level_unit_note(text)
+        if noted_unit:
+            unit_notes.append((record, noted_unit))
 
         levels = parse_level_annotations(text)
         if levels:
@@ -512,7 +561,7 @@ def build_height_association_report(
             height_hits.append((record, height))
 
     # ---- levels ---------------------------------------------------------
-    level_unit = _resolve_level_unit(level_records)
+    level_unit = _resolve_level_unit(level_records, unit_notes)
 
     register: dict[tuple[str, float], dict[str, Any]] = {}
     incomplete_levels = []

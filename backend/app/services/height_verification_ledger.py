@@ -31,6 +31,8 @@ import hashlib
 import json
 import os
 import tempfile
+import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -876,6 +878,28 @@ def load_ledger(folder: Path, project_id: str) -> dict[str, Any]:
     return ledger
 
 
+REPLACE_ATTEMPTS = 20
+REPLACE_WAIT_S = 0.1
+
+
+def _replace_with_retry(source: str, target: Path) -> None:
+    """
+    os.replace, retried briefly on PermissionError.
+
+    On Windows a file another process holds open (a reader, OneDrive sync,
+    an antivirus scan) cannot be replaced for a moment; that is not an error
+    worth losing a reviewer's decision over.
+    """
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPLACE_WAIT_S * (attempt + 1))
+
+
 def save_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -886,7 +910,7 @@ def save_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp_name, path)
+        _replace_with_retry(temp_name, path)
     except Exception:
         try:
             os.unlink(temp_name)
@@ -928,17 +952,21 @@ def screen_mesh_elements(
     assumed or test heights, is withheld with the reasons.
     """
     served, withheld = [], []
+    openings = [e for e in elements if e.get("detected_by") == "wall_gap"]
     for element in elements:
+        if element.get("detected_by") == "wall_gap":
+            continue
         element_id = str(element.get("element_id") or "")
         reasons = []
 
-        if element.get("element_type") == "column":
+        if element.get("element_type") == "column" or element.get("detected_by") == "legend_hatch":
+            noun = "column" if element.get("element_type") == "column" else "hatch wall"
             height = resolve_column_height(ledger, element_id)
             mesh_height = (element.get("dimensions_mm") or {}).get("height")
             if height is None:
-                reasons.append("No active column confirmation with an unchanged plan placement.")
+                reasons.append(f"No active {noun} confirmation with an unchanged plan placement.")
             elif mesh_height is None or abs(float(mesh_height) - height) > 1e-6:
-                reasons.append(f"Column height {mesh_height} differs from the confirmed storey height {height}.")
+                reasons.append(f"{noun.capitalize()} height {mesh_height} differs from the confirmed storey height {height}.")
             if reasons:
                 withheld.append({"element_id": element_id or None, "reasons": reasons})
             else:
@@ -968,6 +996,16 @@ def screen_mesh_elements(
             withheld.append({"element_id": element_id or None, "reasons": reasons})
         else:
             served.append(element)
+
+    # Doors, windows and openings exist only between walls (or a wall and a column) that are served.
+    served_ids = {str(e.get("element_id")) for e in served}
+    for opening in openings:
+        missing = [i for i in opening.get("between") or [] if i not in served_ids]
+        if missing or not opening.get("between"):
+            withheld.append({"element_id": opening.get("element_id"),
+                             "reasons": [f"Its neighbouring wall or column is not served: {missing[:2]}"]})
+        else:
+            served.append(opening)
     return served, withheld
 
 
@@ -1322,12 +1360,21 @@ def suggest_walls(candidates: list[dict[str, Any]], typical_wall_thickness_mm: f
 # Column confirmations (LOD 100): columns run the full storey height.
 # ---------------------------------------------------------------------------
 
+STOREY_ELEMENT_KINDS = {"column": "column", "hatch_wall": "hatch wall"}
+
+
+def confirmed_element_ids(record: dict[str, Any]) -> list[str]:
+    """Element ids of one storey-element confirmation (columns use the older 'column_ids' key)."""
+    return list(record.get("element_ids") or record.get("column_ids") or [])
+
+
 def active_column_confirmations(ledger: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Active storey-height confirmations by element id: detected columns and hatch walls."""
     result: dict[str, dict[str, Any]] = {}
     for record in ledger.get("column_confirmations", []):
         if isinstance(record, dict) and record.get("status") == "active":
-            for column_id in record.get("column_ids", []):
-                result[column_id] = record
+            for element_id in confirmed_element_ids(record):
+                result[element_id] = record
     return result
 
 
@@ -1348,9 +1395,18 @@ def resolve_column_height(ledger: dict[str, Any], column_id: str) -> float | Non
 
 def build_column_confirmation(
     *, ledger: dict[str, Any], project_id: str, request: dict[str, Any],
-    page_candidates: list[dict[str, Any]], now: str | None = None,
+    page_candidates: list[dict[str, Any]], now: str | None = None, element_kind: str = "column",
 ) -> dict[str, Any]:
-    """Validate a reviewer's column confirmation against the page's detected candidates."""
+    """
+    Validate a reviewer's storey-height confirmation of detected elements.
+
+    element_kind "column" (ids in request["column_ids"]) or "hatch_wall"
+    (ids in request["element_ids"]); every id must be a candidate detected on
+    the page, and the page must be placed with a storey height.
+    """
+    if element_kind not in STOREY_ELEMENT_KINDS:
+        raise ValueError(f"Unknown element kind: {element_kind}")
+    noun = STOREY_ELEMENT_KINDS[element_kind]
     _check_ledger(ledger, project_id)
     reviewer = _clean_text(request.get("reviewer"), "reviewer", minimum=2, maximum=120)
     justification = _clean_text(request.get("justification"), "justification", minimum=MIN_JUSTIFICATION_LENGTH)
@@ -1362,25 +1418,46 @@ def build_column_confirmation(
 
     placement = find_active_placement(ledger, drawing_id, page_number)
     if placement is None or placement.get("storey_height_mm") is None:
-        raise ValueError("Place this page with a base and top level first; columns take the storey height.")
+        raise ValueError(f"Place this page with a base and top level first; {noun}s take the storey height.")
 
-    column_ids = request.get("column_ids")
+    id_field, candidate_key = ("column_ids", "column_id") if element_kind == "column" else ("element_ids", "wall_id")
+    column_ids = request.get(id_field)
     if not isinstance(column_ids, list) or not column_ids:
-        raise ValueError("At least one column_id is required")
+        raise ValueError(f"At least one {noun} id is required")
     if len(set(column_ids)) != len(column_ids):
-        raise ValueError("column_ids must be unique")
-    known = {c["column_id"]: c for c in page_candidates}
+        raise ValueError(f"{noun} ids must be unique")
+    known = {c[candidate_key]: c for c in page_candidates}
     missing = [c for c in column_ids if c not in known]
     if missing:
-        raise ValueError(f"Not a detected column on this page: {missing[:5]}")
+        raise ValueError(f"Not a detected {noun} on this page: {missing[:5]}")
     active = active_column_confirmations(ledger)
     clashes = sorted({active[c]["confirmation_id"] for c in column_ids if c in active})
     if clashes:
-        raise VerificationConflict(f"Some columns are already confirmed; revoke first: {clashes}")
+        raise VerificationConflict(f"Some {noun}s are already confirmed; revoke first: {clashes}")
 
     created_at = now or _now()
     confirmation_id = _stable_id([project_id, drawing_id, page_number, sorted(column_ids), created_at,
                                   len(ledger.get("column_confirmations", []))])
+    if element_kind == "hatch_wall":
+        return {
+            "confirmation_id": confirmation_id,
+            "stage": "5.4",
+            "element_kind": "hatch_wall",
+            "created_at": created_at,
+            "status": "active",
+            "reviewer": reviewer,
+            "justification": justification,
+            "project_id": project_id,
+            "drawing_id": drawing_id,
+            "drawing_title": placement.get("drawing_title"),
+            "page_number": page_number,
+            "element_ids": list(column_ids),
+            "wall_types": dict(Counter(known[c].get("wall_type") for c in column_ids)),
+            "placement_id": placement["placement_id"],
+            "height_mm": placement["storey_height_mm"],
+            "height_basis": f"{placement['base_level']['level_key']} to {placement['top_level']['level_key']}",
+            "revocation": None,
+        }
     return {
         "confirmation_id": confirmation_id,
         "stage": "5.4",
@@ -1414,10 +1491,10 @@ def revoke_column_confirmation(
     reason = _clean_text(reason, "reason", minimum=MIN_JUSTIFICATION_LENGTH)
     matches = [r for r in ledger.get("column_confirmations", []) if r.get("confirmation_id") == confirmation_id]
     if len(matches) != 1:
-        raise LookupError("Column confirmation not found")
+        raise LookupError("Confirmation not found")
     record = matches[0]
     if record.get("status") != "active":
-        raise VerificationConflict("Column confirmation is not active")
+        raise VerificationConflict("Confirmation is not active")
     revoked_at = now or _now()
     record["status"] = "revoked"
     record["revocation"] = {"reviewer": reviewer, "reason": reason, "revoked_at": revoked_at}

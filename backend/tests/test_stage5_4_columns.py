@@ -159,7 +159,7 @@ def test_confirmed_columns_generate_and_reach_the_building_with_slabs(project):
     assert conflict.value.status_code == 409
 
     artifact, _ = generation.generate_page_model(project, PROJECT, DRAWING, 1)
-    assert artifact["summary"] == {"confirmed_walls": 0, "confirmed_columns": 4, "meshes_built": 4, "failed": 0}
+    assert artifact["summary"] == {"confirmed_walls": 0, "confirmed_columns": 4, "confirmed_hatch_walls": 0, "meshes_built": 4, "failed": 0}
     assert {e["element_type"] for e in artifact["elements"]} == {"column"}
 
     model = building_model.build_building_model(project, PROJECT)

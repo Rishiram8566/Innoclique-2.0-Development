@@ -4,6 +4,7 @@ from uuid import uuid4, UUID
 
 from datetime import datetime, timezone
 
+import asyncio
 import json
 
 import math
@@ -19,6 +20,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from pydantic import BaseModel, Field
 
@@ -48,6 +50,7 @@ from app.services.plan_placement_router import router as plan_placement_router
 from app.services.recognition_supplement import router as recognition_supplement_router
 from app.services.sheet_registration import router as sheet_registration_router
 from app.services.column_router import router as column_router
+from app.services.auto_pipeline_router import router as auto_pipeline_router
 
 
 
@@ -87,6 +90,10 @@ app.include_router(plan_placement_router)
 app.include_router(recognition_supplement_router)
 app.include_router(sheet_registration_router)
 app.include_router(column_router)
+app.include_router(auto_pipeline_router)
+
+# Building models are large JSON (meshes); compressed they download several times faster.
+app.add_middleware(GZipMiddleware, minimum_size=2048)
 
 app.add_middleware(
 
@@ -618,7 +625,7 @@ def analyze_pdf(pdf_path: Path, filename: str):
 
         dimensions = sorted(set(re.findall(
 
-            r"(?\<!\w)\d+(?:\.\d+)?\s*(?:mm|cm|m|ft|feet|inches|inch|')\b",
+            r"(?<!\w)\d+(?:\.\d+)?\s*(?:mm|cm|m|ft|feet|inches|inch|')\b",
 
             clean_text,
 
@@ -776,6 +783,71 @@ def list_projects():
 
 
 
+MODEL_SUFFIXES = {".ifc", ".dxf", ".dwg"}
+MODEL_SIZE_LIMIT = 300 * 1024 * 1024
+# Files in one upload request. A project has no limit: a client can upload a whole drawing set at once.
+MAX_FILES_PER_UPLOAD = 1000
+CLOSED_FORMATS = {
+    ".rvt": "Revit .rvt files can only be read by Autodesk software. In Revit use File > Export > IFC "
+            "and upload the .ifc file - it keeps walls, doors, windows, slabs, levels and materials.",
+    ".rfa": "Revit family files are components, not a building. Export the project to IFC (File > Export > IFC) instead.",
+}
+
+
+async def _store_model(folder: Path, upload: UploadFile, filename: str, suffix: str) -> dict:
+    """Save an IFC / DXF model (or convert a DWG to DXF) under <project>/models."""
+    model_dir = folder / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_id = str(uuid4())
+    destination = model_dir / f"{model_id}{suffix}"
+    size = 0
+    with destination.open("wb") as output:
+        while chunk := await upload.read(1024 * 1024):
+            size += len(chunk)
+            if size > MODEL_SIZE_LIMIT:
+                output.close()
+                destination.unlink(missing_ok=True)
+                raise ValueError("File exceeds the 300 MB limit.")
+            output.write(chunk)
+    if size == 0:
+        destination.unlink(missing_ok=True)
+        raise ValueError("Empty file.")
+    head = destination.read_bytes()[:4096]
+    if suffix == ".ifc" and b"ISO-10303-21" not in head:
+        destination.unlink(missing_ok=True)
+        raise ValueError("Not an IFC (STEP) file.")
+    if suffix == ".dxf" and not (b"SECTION" in head or head.startswith(b"AutoCAD Binary DXF")):
+        destination.unlink(missing_ok=True)
+        raise ValueError("Not a DXF file.")
+    stored, model_type, converted_from = destination.name, suffix.lstrip("."), None
+    if suffix == ".dwg":
+        from ezdxf.addons import odafc
+        from app.services.cad_convert import find_odafc
+        if not find_odafc():
+            destination.unlink(missing_ok=True)
+            raise ValueError("DWG is AutoCAD's closed format. In AutoCAD (or the free DWG TrueView) use Save As > DXF "
+                             "and upload the .dxf file. (DWG files are converted automatically once the free ODA File "
+                             "Converter is installed on the server.)")
+        dxf_path = destination.with_suffix(".dxf")
+        try:
+            # The converter takes seconds to minutes per sheet: run it off the event loop so the server
+            # keeps answering (project list, models) while a large CAD set uploads.
+            await asyncio.to_thread(odafc.convert, str(destination), str(dxf_path), version="R2018", replace=True)
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            raise ValueError(f"The DWG could not be converted to DXF: {exc}") from exc
+        stored, model_type, converted_from = dxf_path.name, "dxf", destination.name
+    return {
+        "id": model_id,
+        "filename": filename,
+        "stored_filename": stored,
+        "model_type": model_type,
+        "converted_from": converted_from,
+        "size_bytes": size,
+        "uploaded_at": utc_now(),
+    }
+
+
 @app.post("/api/projects/{project_id}/drawings", status_code=201)
 
 async def upload_drawings(project_id: str, files: list[UploadFile] = File(...)):
@@ -798,32 +870,41 @@ async def upload_drawings(project_id: str, files: list[UploadFile] = File(...)):
 
     if not files:
 
-        raise HTTPException(status_code=400, detail="Upload at least one PDF.")
+        raise HTTPException(status_code=400, detail="Upload at least one PDF, DXF or IFC file.")
 
-    if len(files) > 100:
+    if len(files) > MAX_FILES_PER_UPLOAD:
 
         raise HTTPException(
 
             status_code=413,
 
-            detail="Maximum 100 PDFs per upload batch. Upload another batch to continue; projects have no fixed PDF-count limit."
+            detail=f"Maximum {MAX_FILES_PER_UPLOAD} files per upload. Upload the rest in another batch; projects have no file-count limit."
 
         )
 
 
 
     for upload in files:
-
         filename = Path(upload.filename or "").name
-
-        if not filename.lower().endswith(".pdf"):
-
-            rejected.append({"filename": filename, "reason": "Only PDF drawings are accepted."})
-
-            await upload.close()
-
+        suffix = Path(filename).suffix.lower()
+        if suffix in MODEL_SUFFIXES:
+            try:
+                record = await _store_model(folder, upload, filename, suffix)
+                project.setdefault("models", []).append(record)
+                accepted.append(record)
+            except ValueError as exc:
+                rejected.append({"filename": filename, "reason": str(exc)})
+            finally:
+                await upload.close()
             continue
-
+        if suffix in CLOSED_FORMATS:
+            rejected.append({"filename": filename, "reason": CLOSED_FORMATS[suffix]})
+            await upload.close()
+            continue
+        if suffix != ".pdf":
+            rejected.append({"filename": filename, "reason": "Upload PDF drawings, DXF CAD files or IFC (Revit export) models."})
+            await upload.close()
+            continue
 
 
         drawing_id = str(uuid4())
@@ -842,9 +923,9 @@ async def upload_drawings(project_id: str, files: list[UploadFile] = File(...)):
 
                     size += len(chunk)
 
-                    if size > 100 * 1024 * 1024:
+                    if size > MODEL_SIZE_LIMIT:
 
-                        raise ValueError("File exceeds 100 MB limit.")
+                        raise ValueError("File exceeds the 300 MB limit.")
 
                     output.write(chunk)
 
@@ -909,15 +990,11 @@ async def upload_drawings(project_id: str, files: list[UploadFile] = File(...)):
 
 
     return {
-
         "project_id": project_id,
-
         "accepted": accepted,
-
         "rejected": rejected,
-
-        "total_drawings_in_project": len(project.get("drawings", []))
-
+        "total_drawings_in_project": len(project.get("drawings", [])),
+        "total_models_in_project": len(project.get("models", [])),
     }
 
 
@@ -1432,9 +1509,9 @@ def extract_project_geometry_route(
 
 
 
-    if not 1 <= batch_size <= 5:
+    if not 1 <= batch_size <= 25:
 
-        raise HTTPException(status_code=422, detail="batch_size must be between 1 and 5.")
+        raise HTTPException(status_code=422, detail="batch_size must be between 1 and 25.")
 
 
 
@@ -1584,7 +1661,7 @@ def recognize_project_elements_route(
 
     Default: process the next pending PDF.
 
-    Use batch_size up to 5 to process multiple pending PDFs.
+    Use batch_size up to 25 to process multiple pending PDFs.
 
     Optional filename: process one uniquely named PDF.
 
@@ -1606,9 +1683,9 @@ def recognize_project_elements_route(
 
 
 
-    if not 1 <= batch_size <= 5:
+    if not 1 <= batch_size <= 25:
 
-        raise HTTPException(status_code=422, detail="batch_size must be between 1 and 5.")
+        raise HTTPException(status_code=422, detail="batch_size must be between 1 and 25.")
 
 
 

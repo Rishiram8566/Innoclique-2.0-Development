@@ -7,7 +7,8 @@ Column candidates come from the drawings themselves:
   both ends of a line (top and bottom -> a vertical line at that x; left and
   right -> a horizontal line at that y);
 * a column candidate is a square outline ("quad" primitive) of plausible
-  column size whose centre sits on a grid intersection.
+  column size centred on a grid intersection or, for perimeter columns drawn
+  with one face on the grid line, containing it.
 
 Nothing is confirmed here. A reviewer confirms columns per placed page; a
 confirmed column runs the page's full storey height (slab to slab) and stops
@@ -27,9 +28,14 @@ from app.services import bim_geometry_builder as wall_builder
 GRID_ALIGN_TOLERANCE_PT = 0.5
 GRID_SPAN_FRACTION = 0.3
 INTERSECTION_TOLERANCE_PT = 4.0
+FACE_TOLERANCE_PT = 1.0
 COLUMN_MIN_MM = 300.0
 COLUMN_MAX_MM = 1200.0
 COLUMN_MAX_ASPECT = 1.43
+# Third pass, only for intersections still empty: smaller or more elongated columns (e.g. 230 x 300,
+# 230 x 450 in residential frames). Kept separate so earlier passes keep their results and ids.
+SMALL_COLUMN_MIN_MM = 200.0
+SMALL_COLUMN_MAX_ASPECT = 2.0
 COLUMN_MIN_LOD = 100
 
 BOX_FACES = [
@@ -80,28 +86,70 @@ def column_id(drawing_id: str, page_number: int, path_index: int, item_index: in
     return f"{drawing_id}:p{page_number}:column:{path_index}-{item_index}"
 
 
+def _column_outline(primitive, millimetres_per_pdf_point, *, min_mm=COLUMN_MIN_MM, max_aspect=COLUMN_MAX_ASPECT):
+    """(xs, ys, width_mm, height_mm) of a quad of column size and shape, else None."""
+    from app.services.hatch_wall_detection import as_quad
+
+    primitive = as_quad(primitive)
+    if primitive.get("type") != "quad" or not isinstance(primitive.get("points"), list):
+        return None
+    xs = [float(p[0]) for p in primitive["points"]]
+    ys = [float(p[1]) for p in primitive["points"]]
+    width_pt, height_pt = max(xs) - min(xs), max(ys) - min(ys)
+    if width_pt <= 0 or height_pt <= 0:
+        return None
+    width_mm, height_mm = width_pt * millimetres_per_pdf_point, height_pt * millimetres_per_pdf_point
+    if not (min_mm <= width_mm <= COLUMN_MAX_MM and min_mm <= height_mm <= COLUMN_MAX_MM):
+        return None
+    if max(width_mm, height_mm) / min(width_mm, height_mm) > max_aspect:
+        return None
+    return xs, ys, width_mm, height_mm
+
+
+def _lines_through(lines, low, high):
+    return [item for item in lines if low - FACE_TOLERANCE_PT <= item[1] <= high + FACE_TOLERANCE_PT]
+
+
 def detect_columns(
     primitives, *, drawing_id: str, page_number: int, grid: dict[str, dict[str, float]],
     millimetres_per_pdf_point: float,
 ) -> list[dict[str, Any]]:
-    """Square outlines of column size centred on grid intersections."""
+    """
+    Square outlines of column size on grid intersections.
+
+    First pass: outlines centred on an intersection (within 4 pt). Second pass,
+    for intersections still empty: outlines that contain the intersection -
+    perimeter columns are usually drawn with one face on the grid line rather
+    than centred on it.
+    """
     if not grid["vertical"] or not grid["horizontal"]:
         return []
     found: dict[tuple, dict[str, Any]] = {}
+
+    def record(primitive, xs, ys, width_mm, height_mm, key, labels, offsets, alignment):
+        found[key] = {
+            "column_id": column_id(drawing_id, page_number, primitive["path_index"], primitive["item_index"]),
+            "element_type": "column_candidate",
+            "drawing_id": drawing_id,
+            "page_number": page_number,
+            "grid_label": f"{labels[0]}/{labels[1]}",
+            "grid_position_pdf": [key[0], key[1]],
+            "grid_alignment": alignment,
+            "bbox_pdf_points": [round(min(xs), 3), round(min(ys), 3), round(max(xs), 3), round(max(ys), 3)],
+            "size_mm": [round(width_mm, 1), round(height_mm, 1)],
+            "offset_from_grid_pt": [round(offsets[0], 3), round(offsets[1], 3)],
+            "source": {"path_index": primitive["path_index"], "item_index": primitive["item_index"], "type": "quad"},
+            "verification_required": True,
+        }
+
+    primitives = list(primitives)
+    outlines = []
     for primitive in primitives:
-        if primitive.get("type") != "quad" or not isinstance(primitive.get("points"), list):
+        outline = _column_outline(primitive, millimetres_per_pdf_point)
+        if outline is None:
             continue
-        xs = [float(p[0]) for p in primitive["points"]]
-        ys = [float(p[1]) for p in primitive["points"]]
-        width_pt, height_pt = max(xs) - min(xs), max(ys) - min(ys)
-        if width_pt <= 0 or height_pt <= 0:
-            continue
-        width_mm, height_mm = width_pt * millimetres_per_pdf_point, height_pt * millimetres_per_pdf_point
-        aspect = max(width_mm, height_mm) / min(width_mm, height_mm)
-        if not (COLUMN_MIN_MM <= width_mm <= COLUMN_MAX_MM and COLUMN_MIN_MM <= height_mm <= COLUMN_MAX_MM):
-            continue
-        if aspect > COLUMN_MAX_ASPECT:
-            continue
+        outlines.append((primitive, outline))
+        xs, ys, width_mm, height_mm = outline
         cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
         x_label, dx = _nearest(cx, grid["vertical"])
         y_label, dy = _nearest(cy, grid["horizontal"])
@@ -110,21 +158,37 @@ def detect_columns(
         # One column per grid intersection: an outline drawn twice (or slightly
         # offset) at the same intersection is the same column; keep the first.
         key = (round(_line_position(grid["vertical"], cx), 1), round(_line_position(grid["horizontal"], cy), 1))
-        if key in found:
+        if key not in found:
+            record(primitive, xs, ys, width_mm, height_mm, key, (x_label, y_label), (dx, dy), "centred")
+
+    for primitive, (xs, ys, width_mm, height_mm) in outlines:
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        through_x = _lines_through(grid["vertical"], min(xs), max(xs))
+        through_y = _lines_through(grid["horizontal"], min(ys), max(ys))
+        if len(through_x) != 1 or len(through_y) != 1:
+            continue    # no intersection inside, or ambiguous (two grid lines through one outline)
+        (x_label, x_line), (y_label, y_line) = through_x[0], through_y[0]
+        key = (round(x_line, 1), round(y_line, 1))
+        if key not in found:
+            record(primitive, xs, ys, width_mm, height_mm, key, (x_label, y_label),
+                   (abs(cx - x_line), abs(cy - y_line)), "face_on_grid")
+
+    for primitive in primitives:
+        outline = _column_outline(primitive, millimetres_per_pdf_point,
+                                  min_mm=SMALL_COLUMN_MIN_MM, max_aspect=SMALL_COLUMN_MAX_ASPECT)
+        if outline is None:
             continue
-        found[key] = {
-            "column_id": column_id(drawing_id, page_number, primitive["path_index"], primitive["item_index"]),
-            "element_type": "column_candidate",
-            "drawing_id": drawing_id,
-            "page_number": page_number,
-            "grid_label": f"{x_label}/{y_label}",
-            "grid_position_pdf": [key[0], key[1]],
-            "bbox_pdf_points": [round(min(xs), 3), round(min(ys), 3), round(max(xs), 3), round(max(ys), 3)],
-            "size_mm": [round(width_mm, 1), round(height_mm, 1)],
-            "offset_from_grid_pt": [round(dx, 3), round(dy, 3)],
-            "source": {"path_index": primitive["path_index"], "item_index": primitive["item_index"], "type": "quad"},
-            "verification_required": True,
-        }
+        xs, ys, width_mm, height_mm = outline
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        through_x = _lines_through(grid["vertical"], min(xs), max(xs))
+        through_y = _lines_through(grid["horizontal"], min(ys), max(ys))
+        if len(through_x) != 1 or len(through_y) != 1:
+            continue
+        (x_label, x_line), (y_label, y_line) = through_x[0], through_y[0]
+        key = (round(x_line, 1), round(y_line, 1))
+        if key not in found:
+            record(primitive, xs, ys, width_mm, height_mm, key, (x_label, y_label),
+                   (abs(cx - x_line), abs(cy - y_line)), "small_or_elongated")
     return sorted(found.values(), key=lambda c: (c["grid_position_pdf"][1], c["grid_position_pdf"][0]))
 
 
@@ -181,6 +245,7 @@ def build_column_mesh(candidate: dict[str, Any], *, millimetres_per_pdf_point: f
 def page_columns(folder: Path, drawing_id: str, page_number: int, *, page_size: tuple[float, float],
                  millimetres_per_pdf_point: float | None) -> list[dict[str, Any]]:
     """Detect a page's column candidates from its sidecar and the sheet's grid bubbles."""
+    from app.services.hatch_wall_detection import page_scan
     from app.services.sheet_registration import sheet_index
 
     if not millimetres_per_pdf_point:
@@ -189,5 +254,6 @@ def page_columns(folder: Path, drawing_id: str, page_number: int, *, page_size: 
     if not sidecar.is_file():
         return []
     grid = grid_lines(sheet_index(folder).get(drawing_id), page_size)
-    return detect_columns(read_page_primitives(sidecar), drawing_id=drawing_id, page_number=page_number,
+    quads = page_scan(sidecar, millimetres_per_pdf_point=millimetres_per_pdf_point).quads
+    return detect_columns(quads, drawing_id=drawing_id, page_number=page_number,
                           grid=grid, millimetres_per_pdf_point=millimetres_per_pdf_point)

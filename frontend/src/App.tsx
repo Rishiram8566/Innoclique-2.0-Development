@@ -1,10 +1,7 @@
 ﻿
-import { useEffect, useState } from 'react';
-import SceneViewer from './SceneViewer';
-import HeightVerificationPanel from './HeightVerificationPanel';
+import { useEffect, useRef, useState } from 'react';
 import ModelViewer3D from './ModelViewer3D';
-import ColumnsBox from './ColumnsBox';
-import CalibrationPanel from './CalibrationPanel';
+import AutoModelPanel from './AutoModelPanel';
 import {
   Building2,
   FileUp,
@@ -27,6 +24,7 @@ type Project = {
     size_bytes: number;
     processing_status: string;
   }[];
+  models?: { id: string; filename: string; model_type: string }[];
 };
 
 export default function App() {
@@ -39,28 +37,49 @@ export default function App() {
     'Create a project workspace to begin.'
   );
   const [busy, setBusy] = useState(false);
-  const [selectedDrawingId, setSelectedDrawingId] = useState('');
-  // Bumped after a page calibration so dependent panels reload their mm values.
-  const [calibrationVersion, setCalibrationVersion] = useState(0);
+  // Bumped when the automatic pipeline finishes so the 3D model reloads.
+  const [modelVersion, setModelVersion] = useState(0);
+
+  // Set when the project list could not be loaded, so the library never claims there are no projects
+  // just because the server was busy or down; the list is retried until it loads.
+  const [listError, setListError] = useState<string | null>(null);
+  const retryTimer = useRef<number | null>(null);
 
   async function refresh() {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
     try {
-      const response = await fetch(`${API}/projects`);
+      const response = await fetch(`${API}/projects`, { signal: controller.signal });
 
       if (!response.ok) {
         throw new Error('API unavailable');
       }
 
       setProjects(await response.json());
+      setListError(null);
     } catch {
+      setListError(
+        'Could not load your projects: the server is busy or not running. Retrying automatically...'
+      );
       setMessage(
         'Backend not connected. Start the FastAPI server on port 8000.'
       );
+      if (retryTimer.current === null) {
+        retryTimer.current = window.setTimeout(() => {
+          retryTimer.current = null;
+          refresh();
+        }, 5000);
+      }
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 
   useEffect(() => {
     refresh();
+    return () => {
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+    };
   }, []);
 
   async function createProject() {
@@ -83,7 +102,6 @@ export default function App() {
       const project = await response.json();
 
       setActive(project);
-      setSelectedDrawingId(project.drawings?.[0]?.id ?? '');
       setMessage(
         'Project workspace created. Add its related PDF drawing sheets.'
       );
@@ -130,7 +148,10 @@ export default function App() {
       }
 
       setMessage(
-        `${result.accepted.length} PDF(s) added to this project. ${result.rejected.length} rejected.`
+        `${result.accepted.length} file(s) added to this project.`
+        + (result.rejected.length
+          ? ` Not added: ${result.rejected.map((r: { filename: string; reason: string }) => `${r.filename} — ${r.reason}`).join(' | ')}`
+          : '')
       );
 
       const refreshed = await fetch(`${API}/projects`);
@@ -226,6 +247,7 @@ export default function App() {
               <option value="industrial_plant">Industrial plant</option>
               <option value="power_station">Power station</option>
               <option value="water_dam">Water dam</option>
+              <option value="telecom_tower">Cell / telecom tower</option>
               <option value="bridge">Bridge / infrastructure</option>
               <option value="water_treatment">
                 Water treatment plant
@@ -262,9 +284,12 @@ export default function App() {
               <FileUp size={25} />
             </div>
 
-            <h3>Add related PDF drawings (up to 100 per batch)</h3>
+            <h3>Add drawings and models (any number of files)</h3>
 
             <p>
+              IFC models (from Revit: File &gt; Export &gt; IFC), CAD files (.dwg, .dxf) and PDF drawings.
+              IFC gives the most exact model, then CAD: real dimensions, levels, doors, windows, equipment and materials.
+              A Revit .rvt file cannot be read directly; export it to IFC first.
               Floor plans, elevations, sections, structural and MEP
               sheets can be grouped under the same project.
             </p>
@@ -272,19 +297,19 @@ export default function App() {
             <input
               id="pdf-input"
               type="file"
-              accept="application/pdf,.pdf"
+              accept="application/pdf,.pdf,.dxf,.dwg,.ifc,.rvt"
               multiple
               onChange={e => setFiles(e.target.files)}
             />
 
             <label htmlFor="pdf-input" className="file-button">
-              Choose PDF files
+              Choose files (PDF, DXF, IFC)
             </label>
 
             <small>
               {files?.length
                 ? `${files.length} file(s) selected`
-                : 'Up to 100 PDFs per batch · No fixed project PDF-count limit'}
+                : 'PDF · DWG · DXF · IFC (Revit export) · up to 1000 files per upload'}
             </small>
           </div>
 
@@ -320,9 +345,8 @@ export default function App() {
             <div className="notice">
               <ShieldCheck size={17} />
               <span>
-                Files are grouped into one project workspace.
-                Drawing interpretation and BIM generation are the
-                next engineering stages.
+                Files are grouped into one project workspace. After uploading,
+                press “Generate 3D model” below.
               </span>
             </div>
           </div>
@@ -334,101 +358,47 @@ export default function App() {
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">03 / PHASE 6.0 SCENE VIEWER</span>
-            <h2>Drawing geometry preview</h2>
+            <span className="eyebrow">03 / GENERATE</span>
+            <h2>Generate the 3D model</h2>
           </div>
-          <span className="tag">Source-grounded · Page-local</span>
+          <span className="tag">Upload PDFs · one click · LOD 100–500</span>
         </div>
-
-        {!active ? (
-          <div className="message">Select a project to view its drawing geometry.</div>
-        ) : (
-          <>
-            <label>
-              Drawing sheet
-              <select value={selectedDrawingId} onChange={e => setSelectedDrawingId(e.target.value)}>
-                <option value="">Select a drawing</option>
-                {active.drawings?.map(drawing => (
-                  <option key={drawing.id} value={drawing.id}>
-                    {drawing.filename}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {selectedDrawingId ? (
-              <SceneViewer projectId={active.id} drawingId={selectedDrawingId} />
-            ) : (
-              <div className="message">Upload a PDF drawing to this project to preview its geometry.</div>
-            )}
-          </>
-        )}
-      </section>
-
-      <section className="workspace">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">04 / STAGE 5.2 CALIBRATION + 5.4 PLACEMENT</span>
-            <h2>Page scale and plan placement</h2>
-          </div>
-          <span className="tag">Scale · level · reference point · never guessed</span>
-        </div>
-
-        {active && selectedDrawingId ? (
-          <CalibrationPanel
+        {active ? (
+          <AutoModelPanel
+            key={active.id}
             projectId={active.id}
-            drawingId={selectedDrawingId}
-            onCalibrated={() => setCalibrationVersion(version => version + 1)}
+            drawingCount={(active.drawings?.length ?? 0) + (active.models?.length ?? 0)}
+            onFinished={() => setModelVersion(version => version + 1)}
           />
         ) : (
-          <div className="message">
-            Select a project and a drawing sheet above to calibrate its scale.
-          </div>
+          <div className="message">Create or select a project, then upload its PDF drawings.</div>
         )}
       </section>
 
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">05 / STAGE 5.3.5 HEIGHT VERIFICATION</span>
-            <h2>Wall-height verification</h2>
+            <span className="eyebrow">04 / 3D MODEL</span>
+            <h2>3D model by level of detail</h2>
           </div>
-          <span className="tag">Human decision · Audited · No auto-approval</span>
+          <span className="tag">LOD 100–500 · whole building or one drawing</span>
         </div>
-
-        {active && selectedDrawingId ? (
-          <div style={{ display: 'grid', gap: 18 }}>
-            <HeightVerificationPanel key={calibrationVersion} projectId={active.id} drawingId={selectedDrawingId} />
-            <ColumnsBox key={`columns-${calibrationVersion}`} projectId={active.id} drawingId={selectedDrawingId} />
-          </div>
+        {active ? (
+          <ModelViewer3D
+            key={`${active.id}-${modelVersion}`}
+            projectId={active.id}
+            drawings={active.drawings ?? []}
+          />
         ) : (
-          <div className="message">
-            Select a project and a drawing sheet above to verify wall heights.
-          </div>
+          <div className="message">Select a project to view its 3D model.</div>
         )}
       </section>
+
 
       <section className="workspace">
         <div className="section-heading">
           <div>
-            <span className="eyebrow">06 / STAGE 5.4 3D MODEL</span>
-            <h2>Verified 3D model</h2>
-          </div>
-          <span className="tag">Reviewer-confirmed walls only · LOD 100–500</span>
-        </div>
-
-        {active && selectedDrawingId ? (
-          <ModelViewer3D key={calibrationVersion} projectId={active.id} drawingId={selectedDrawingId} />
-        ) : (
-          <div className="message">
-            Select a project and a drawing sheet above to view its 3D model.
-          </div>
-        )}
-      </section>
-
-      <section className="workspace">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">07 / PROJECT LIBRARY</span>
+            <span className="eyebrow">05 / PROJECT LIBRARY</span>
             <h2>Your projects</h2>
           </div>
 
@@ -442,7 +412,7 @@ export default function App() {
             <div className="empty">
               <FolderOpen size={24} />
               <span>
-                No projects yet. Create your first workspace above.
+                {listError ?? 'No projects yet. Create your first workspace above.'}
               </span>
             </div>
           ) : (
@@ -464,6 +434,7 @@ export default function App() {
                   <small>
                     {project.project_type.replace(/_/g, ' ')} ·{' '}
                     {project.drawings?.length ?? 0} PDF(s)
+                    {project.models?.length ? ` · ${project.models.length} CAD/BIM model(s)` : ''}
                   </small>
                 </div>
 

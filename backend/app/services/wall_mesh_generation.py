@@ -29,6 +29,8 @@ from typing import Any
 from app.services import bim_geometry_builder as wall_builder
 from app.services import height_verification_ledger as ledger_service
 from app.services import column_detection as columns_module
+from app.services import hatch_wall_detection as hatch_walls
+from app.services import opening_detection as openings_module
 from app.services.recognition_supplement import read_recognition
 
 
@@ -173,14 +175,17 @@ def build_verified_wall_model(
             and record.get("page_number") == page_number
         ):
             confirmed.append((element_id, record))
-    confirmed_columns = [
-        column_id for column_id, record in ledger_service.active_column_confirmations(ledger).items()
+    confirmed_detected = {
+        element_id: record.get("element_kind", "column")
+        for element_id, record in ledger_service.active_column_confirmations(ledger).items()
         if record.get("drawing_id") == drawing_id and record.get("page_number") == page_number
-    ]
-    if not confirmed and not confirmed_columns:
+    }
+    confirmed_columns = [i for i, kind in confirmed_detected.items() if kind == "column"]
+    confirmed_hatch_walls = [i for i, kind in confirmed_detected.items() if kind == "hatch_wall"]
+    if not confirmed and not confirmed_detected:
         raise GenerationBlocked(
             "No reviewer-confirmed walls or columns on this page yet. Confirm walls in "
-            "Stage 5.3.5 height verification (or columns) first."
+            "Stage 5.3.5 height verification (or columns / hatch walls) first."
         )
 
     candidates: dict[str, dict[str, Any]] = {}
@@ -262,21 +267,26 @@ def build_verified_wall_model(
     scale = float(calibration["millimetres_per_pdf_point"])
     page_size = _page_size(page.get("page_size_pdf_points"))
 
-    # Columns (LOD 100): confirmed column outlines, full storey height.
-    if confirmed_columns:
-        detected = {c["column_id"]: c for c in (column_loader(scale, page_size) if column_loader else [])}
-        for column_id in sorted(confirmed_columns):
+    # Columns (LOD 100) and legend-hatch walls (LOD 300): confirmed detections, full storey height.
+    if confirmed_detected:
+        detected = {
+            c.get("column_id") or c.get("wall_id"): c
+            for c in (column_loader(scale, page_size) if column_loader else [])
+        }
+        for element_id in sorted(confirmed_detected):
+            noun = "column" if confirmed_detected[element_id] == "column" else "hatch wall"
             try:
-                candidate = detected.get(column_id)
+                candidate = detected.get(element_id)
                 if candidate is None:
-                    raise ValueError("Confirmed column is no longer detected on this page")
-                height = ledger_service.resolve_column_height(ledger, column_id)
+                    raise ValueError(f"Confirmed {noun} is no longer detected on this page")
+                height = ledger_service.resolve_column_height(ledger, element_id)
                 if height is None:
-                    raise ValueError("Column confirmation or plan placement is no longer active")
-                elements.append(columns_module.build_column_mesh(
-                    candidate, millimetres_per_pdf_point=scale, height_mm=height))
+                    raise ValueError(f"{noun.capitalize()} confirmation or plan placement is no longer active")
+                builder = (columns_module.build_column_mesh if candidate.get("element_type") == "column_candidate"
+                           else hatch_walls.build_hatch_wall_mesh)
+                elements.append(builder(candidate, millimetres_per_pdf_point=scale, height_mm=height))
             except ValueError as exc:
-                failed.append({"element_id": column_id, "reason": str(exc)})
+                failed.append({"element_id": element_id, "reason": str(exc)})
     page_size_mm = (
         [round(page_size[0] * scale, 3), round(page_size[1] * scale, 3)]
         if page_size else None
@@ -320,6 +330,7 @@ def build_verified_wall_model(
         "summary": {
             "confirmed_walls": len(confirmed),
             "confirmed_columns": len(confirmed_columns),
+            "confirmed_hatch_walls": len(confirmed_hatch_walls),
             "meshes_built": len(elements),
             "failed": len(failed),
         },
@@ -329,9 +340,19 @@ def build_verified_wall_model(
             "Only reviewer-confirmed walls are built; no other element is inferred.",
             "Coordinates are page-local millimetres from a calibration that requires verification.",
             "Wall bases sit at page-local z = 0; floor levels are not yet associated.",
-            "No columns, beams, slabs, doors or windows are generated at this stage.",
+            "Columns and hatch walls are reviewer-confirmed detections at full storey height.",
+            "No beams, slabs, doors or windows are generated at this stage.",
         ],
     }
+
+
+def detected_elements(folder: Path, drawing_id: str, page_number: int, page_size, scale: float) -> list[dict[str, Any]]:
+    """Column candidates plus legend-hatch wall candidates of one page."""
+    columns = columns_module.page_columns(
+        folder, drawing_id, page_number, page_size=page_size, millimetres_per_pdf_point=scale)
+    walls, _ = hatch_walls.page_hatch_walls(
+        folder, drawing_id, page_number, millimetres_per_pdf_point=scale, columns=columns)
+    return columns + walls
 
 
 def generate_page_model(project_folder: Path, project_id: str, drawing_id: str, page_number: int) -> tuple[dict[str, Any], Path]:
@@ -354,11 +375,47 @@ def generate_page_model(project_folder: Path, project_id: str, drawing_id: str, 
         drawing_id=drawing_id,
         page_number=page_number,
         source_line_loader=loader,
-        column_loader=lambda scale, page_size: columns_module.page_columns(
-            folder, drawing_id, page_number, page_size=page_size, millimetres_per_pdf_point=scale),
+        column_loader=lambda scale, page_size: detected_elements(folder, drawing_id, page_number, page_size, scale),
     )
+
+    add_openings(folder, artifact, drawing_id, page_number)
 
     path = artifacts / OUTPUT_DIRECTORY / output_artifact_name(drawing_id)
     # Fully derived from the ledger and source artifacts, so it is replaced on each run.
     ledger_service.save_json_atomic(path, artifact)
     return artifact, path
+
+
+def add_openings(folder: Path, artifact: dict[str, Any], drawing_id: str, page_number: int) -> None:
+    """Doors, windows and openings in the gaps of this page's built walls (see opening_detection)."""
+    from app.services.sheet_registration import sheet_index
+
+    scale = float((artifact.get("calibration") or {}).get("millimetres_per_pdf_point") or 0)
+    sidecar = Path(folder) / "artifacts" / "primitive_sidecars" / f"{drawing_id}_page_{page_number}.jsonl"
+    if not scale or not sidecar.is_file():
+        return
+    walls, columns = [], []
+    for element in artifact.get("elements") or []:
+        vertices = element["mesh"]["vertices"]
+        xs = [v[0] for v in vertices]; ys = [v[1] for v in vertices]; zs = [v[2] for v in vertices]
+        item = {"id": element["element_id"], "bbox": [min(xs) / scale, min(ys) / scale, max(xs) / scale, max(ys) / scale],
+                "component": element.get("component"), "height_mm": max(zs) - min(zs)}
+        if element.get("element_type") == "wall" and len(vertices) == 8:
+            walls.append(item)
+        elif element.get("element_type") == "column":
+            columns.append(item)
+    if not walls:
+        return
+    scan = hatch_walls.page_scan(sidecar, millimetres_per_pdf_point=scale)
+    entry = sheet_index(folder).get(drawing_id)
+    heights_by_id = {w["id"]: w["height_mm"] for w in walls + columns}
+    counts = {"door": 0, "window": 0, "opening": 0, "assumed_heights": 0}
+    for opening in openings_module.detect_openings(scan, walls, columns, millimetres_per_pdf_point=scale):
+        heights = openings_module.opening_heights(opening, entry, millimetres_per_pdf_point=scale)
+        wall_height = min(heights_by_id[i] for i in opening["between"])
+        element_id = f"{drawing_id}:p{page_number}:{opening['kind']}:" + ",".join(f"{v:.2f}" for v in opening["bbox_pdf_points"])
+        artifact["elements"].append(openings_module.build_opening_element(
+            opening, heights, element_id=element_id, millimetres_per_pdf_point=scale, wall_height_mm=wall_height))
+        counts[opening["kind"]] += 1
+        counts["assumed_heights"] += heights["height_source"] == "assumed_typical"
+    artifact["openings_summary"] = counts

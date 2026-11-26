@@ -281,3 +281,26 @@ def test_source_reference_is_preserved():
 def test_invalid_source_reports_are_rejected(bad):
     with pytest.raises(ValueError):
         build_height_association_report(bad)
+
+
+# ------------------------------------------------------------ level unit from a drawing note
+
+def test_level_unit_note_resolves_unitless_levels():
+    from app.services.wall_height_evidence_association import parse_level_unit_note, _resolve_level_unit
+
+    assert parse_level_unit_note("2. ALL LEVELS ARE IN METRES.") == "m"
+    assert parse_level_unit_note("ALL LEVELS SHOWN IN MILLIMETRES") == "mm"
+    assert parse_level_unit_note("ALL DIMENSIONS ARE IN MILLIMETRES") is None
+    assert parse_level_unit_note("LEVEL 2 IN PLANT ROOM") is None
+
+    unitless = [({"evidence_id": "a"}, {"value_status": "parsed", "unit": None})]
+    noted = _resolve_level_unit(unitless, [({"evidence_id": "n"}, "m")])
+    assert noted["status"] == "resolved_from_drawing_note" and noted["unit"] == "m"
+    assert _resolve_level_unit(unitless)["status"] == "unresolved"
+
+    explicit_mm = [({"evidence_id": "b"}, {"value_status": "parsed", "unit": "mm"})]
+    conflict = _resolve_level_unit(explicit_mm, [({"evidence_id": "n"}, "m")])
+    assert conflict["status"] == "unresolved"
+    agree = _resolve_level_unit([({"evidence_id": "c"}, {"value_status": "parsed", "unit": "m"})],
+                                [({"evidence_id": "n"}, "m")])
+    assert agree["status"] == "resolved_from_project_annotations"

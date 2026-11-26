@@ -13,3 +13,5 @@ ijson>=3.2
 # PATH or in C:\Program Files\Tesseract-OCR.
 Pillow>=10.0
 pytesseract>=0.3.10
+ezdxf>=1.4
+ifcopenshell>=0.8

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.services import building_model
@@ -179,6 +179,6 @@ def revoke_placement(project_id: str, placement_id: str, payload: RevokeRequest)
 def get_building_model(project_id: str):
     safe, folder = _folder(project_id)
     try:
-        return building_model.build_building_model(folder, safe)
+        return Response(content=building_model.cached_building_model_json(folder, safe), media_type="application/json")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
