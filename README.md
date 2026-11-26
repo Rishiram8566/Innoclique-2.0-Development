@@ -3,7 +3,7 @@
 Upload PDF drawings, CAD files (DWG, DXF) or an IFC model (Revit export) and Innoclique builds a 3D building
 model, from LOD 100 to LOD 500: walls, floors, doors, windows, stairs, lifts, roofs, furniture and equipment.
 
-The latest work is on the branch **`stage-5.3.4-5.3.5-height-verification`**.
+The latest code is on the **`main`** branch (what you get when you clone).
 
 ## What you need
 
@@ -23,13 +23,14 @@ PDF, DXF and IFC uploads work without the ODA File Converter. Install it in its 
 
 Open **PowerShell** and run these one after another.
 
-1. Get the code and switch to the latest branch:
+1. Get the code:
 
    ```powershell
    git clone https://github.com/Rishiram8566/Innoclique-2.0-Development.git
    cd Innoclique-2.0-Development
-   git checkout stage-5.3.4-5.3.5-height-verification
    ```
+
+   Already cloned it before? Get the latest instead: `git checkout main` then `git pull`.
 
 2. Install the server (backend):
 
