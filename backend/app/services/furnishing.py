@@ -18,8 +18,14 @@ simple layout rules. Every piece says so, because no drawing gives these sizes.
   next wall is free), wall cupboards away from windows, a hob and hood, a sink
   (under a window if one is there), and a refrigerator.
 * Dress and wardrobe rooms get wardrobes; utility and laundry a washing machine;
-  office and study a desk and chair; meeting rooms a table and chairs; reception a
-  sofa and desk.
+  reception a sofa and desk.
+* Office: a cabin or small office (up to 24 m2) gets a desk, chair and storage
+  cabinet; a larger or open-plan office is filled with rows of back-to-back
+  workstations (desk, screen, chair), with walkways between the rows, cross-aisles
+  every four desks and a clear edge along the walls. Meeting rooms get a table sized
+  to the room (up to a 7.2 m board table) with chairs and a display on an end wall;
+  cafeterias and break-out areas a servery counter and four-seat tables; print and
+  copy rooms a copier and a cabinet.
 
 Furniture keeps clear of door swings, stairs, lifts and columns, and stays inside
 the room. A piece that does not fit is left out.
@@ -52,10 +58,23 @@ ROOM_TYPES = [
     ("dining", re.compile(r"\b(?:DINING|DNG|DIN)\b")),
     ("dress", re.compile(r"\b(?:DRESS|WARDROBE|CLOSET|WIC|W\.I\.C|WALK-?IN)\b")),
     ("utility", re.compile(r"\b(?:UTILITY|UTL|LAUNDRY|WASH AREA)\b")),
-    ("office", re.compile(r"\b(?:OFFICE|STUDY|CABIN|LIBRARY|WORK ?ROOM)\b")),
-    ("meeting", re.compile(r"\b(?:MEETING|CONFERENCE|BOARD ?ROOM)\b")),
+    ("office", re.compile(r"\b(?:OFFICE|STUDY|CABIN|LIBRARY|WORK ?ROOM|WORK ?STATIONS?|OPEN ?PLAN|WORK ?AREA|"
+                          r"CO-?WORKING|ADMIN(?:ISTRATION)?|ACCOUNTS)\b")),
+    ("meeting", re.compile(r"\b(?:MEETING|CONFERENCE|BOARD ?ROOM|HUDDLE|DISCUSSION)\b")),
     ("reception", re.compile(r"\b(?:RECEPTION|WAITING)\b")),
+    ("cafeteria", re.compile(r"\b(?:CAFETERIA|CAFE|CANTEEN|BREAK ?-?OUT|BREAK ?ROOM|STAFF ?ROOM|LUNCH ?ROOM)\b")),
+    ("print", re.compile(r"\b(?:PRINT(?:ING)?|COPY|PHOTO ?COPY|REPRO(?:GRAPHICS)?)\b")),
 ]
+# Workplace rooms run larger than homes' rooms, and columns stand inside them.
+OPEN_PLAN_KINDS = {"office", "meeting", "reception", "cafeteria"}
+OPEN_ROOM_MAX_MM = 40000.0
+CABIN_MAX_M2 = 24.0             # an office up to this size is a cabin: one desk
+DESK_W, DESK_D = 1400.0, 700.0  # a workstation desk
+CHAIR_ZONE = 750.0              # chair and pull-out space behind a desk
+AISLE = 1000.0                  # walkway between two rows of workstations
+EDGE = 900.0                    # kept clear along the walls (circulation, windows, radiators)
+CLUSTER = 4                     # desks side by side before a cross-aisle
+CROSS_AISLE = 1200.0
 # "HALL" is the living room on many residential plans, but LIFT HALL, CHILLER HALL or ENTRANCE HALL are not:
 # it counts only when every other word on the label is one of these.
 HALL_COMPANIONS = {"HALL", "MAIN", "CENTRAL", "LIVING", "FAMILY", "DRAWING", "DINING", "CUM", "AND", "ROOM"}
@@ -422,6 +441,63 @@ def desk(room, side, u, width=1400.0):
     return [p, chair]
 
 
+def workstation(room, side, u, v0, facing):
+    """A desk with its screen and chair; the person sits on the low-v side when facing is +1, else the high-v side."""
+    a, b = u - DESK_W / 2, u + DESK_W / 2
+    p = Piece("workstation desk", room, side, (DESK_W, DESK_D, 1150))
+    p.add(a, b, v0, v0 + DESK_D, 720, 750, "white")
+    p.add(a, a + 40, v0, v0 + DESK_D, 0, 720, "steel").add(b - 40, b, v0, v0 + DESK_D, 0, 720, "steel")
+    if facing > 0:
+        p.add(u - 280, u + 280, v0 + DESK_D - 130, v0 + DESK_D - 100, 800, 1150, "screen")
+        p.add(a, b, v0 + DESK_D - 20, v0 + DESK_D, 750, 1150, "fabric")            # screen between facing desks
+        c1 = v0 - 60
+        chair = Piece("office chair", room, side, (550, 550, 1000))
+        chair.add(u - 260, u + 260, c1 - 520, c1, 0, 480, "chair").add(u - 240, u + 240, c1 - 520, c1 - 470, 480, 1000, "chair")
+    else:
+        p.add(u - 280, u + 280, v0 + 100, v0 + 130, 800, 1150, "screen")
+        c0 = v0 + DESK_D + 60
+        chair = Piece("office chair", room, side, (550, 550, 1000))
+        chair.add(u - 260, u + 260, c0, c0 + 520, 0, 480, "chair").add(u - 240, u + 240, c0 + 470, c0 + 520, 480, 1000, "chair")
+    return [p, chair]
+
+
+def cabinet(room, side, u, width=1200.0, depth=450.0, height=1100.0, name="storage cabinet"):
+    a, b = u - width / 2, u + width / 2
+    return Piece(name, room, side, (width, depth, height)).add(a, b, 0, depth, 0, height - 30, "cabinet") \
+        .add(a, b, 0, depth, height - 30, height, "wood_light")
+
+
+def display(room, side, u, width=1600.0):
+    return Piece("display screen", room, side, (width, 60, 950)).add(u - width / 2, u + width / 2, 0, 60, 1000, 1950,
+                                                                       "screen")
+
+
+def servery(room, side, u, width=3000.0):
+    a, b = u - width / 2, u + width / 2
+    p = Piece("servery counter", room, side, (width, 700, 900))
+    p.add(a, b, 0, 650, 0, 860, "cabinet").add(a, b, 0, 700, 860, 900, "granite")
+    p.add(a + 200, a + 600, 60, 460, 900, 1350, "steel")                                  # coffee machine
+    return p
+
+
+def copier(room, side, u):
+    p = Piece("printer / copier", room, side, (1100, 650, 1150))
+    p.add(u - 550, u + 550, 0, 650, 0, 950, "white").add(u - 450, u + 450, 40, 600, 950, 1150, "white")
+    p.add(u + 200, u + 450, 560, 640, 950, 1050, "black")                                 # control panel
+    return p
+
+
+def _centred(span: float, size: float, pitch: float, edge: float) -> list[float]:
+    """Centres of as many items of `size`, every `pitch`, as fit in `span` with `edge` clear at both ends."""
+    room_for = span - 2 * edge
+    if room_for < size:
+        return []
+    count = int((room_for - size) // pitch) + 1
+    used = size + (count - 1) * pitch
+    start = edge + (room_for - used) / 2 + size / 2
+    return [start + k * pitch for k in range(count)]
+
+
 def reception_desk(room, side, u, width=1800.0):
     return Piece("reception desk", room, side, (width, 700, 1100)).add(u - width / 2, u + width / 2, 0, 700, 0, 1100,
                                                                          "wood_light")
@@ -603,17 +679,70 @@ def furnish_utility(room, out, seed):
 
 
 def furnish_office(room, out, seed):
-    wall = room.best_wall(1400, 1400, shun=())
-    if wall:
-        _try(room, desk(room, *wall), out)
+    width, depth = room.x1 - room.x0, room.y1 - room.y0
+    band = 2 * CHAIR_ZONE + 2 * DESK_D                # one row: two facing desks with their chairs
+    if width * depth / 1e6 <= CABIN_MAX_M2 or min(width, depth) < band + 2 * EDGE:
+        wall = room.best_wall(1400, 1400, shun=())
+        if wall:
+            _try(room, desk(room, *wall), out)
+        wall = room.best_wall(1200, 450)
+        if wall:
+            _try(room, [cabinet(room, *wall)], out)
+        return
+    # Open plan: rows along the longer walls, back-to-back desks, cross-aisles every CLUSTER desks.
+    side = "n" if room.length("n") >= room.length("w") else "w"
+    length, across = room.length(side), room.depth(side)
+    rows = _centred(across, band, band + AISLE, EDGE)
+    along: list[float] = []
+    for cluster in _centred(length, CLUSTER * DESK_W, CLUSTER * DESK_W + CROSS_AISLE, EDGE):
+        along += [cluster + (k - (CLUSTER - 1) / 2) * DESK_W for k in range(CLUSTER)]
+    if not along:                                     # shorter than one cluster: as many desks as fit
+        along = _centred(length, DESK_W, DESK_W, EDGE)
+    for centre in rows:
+        v = centre - band / 2
+        for u in along:
+            _try(room, workstation(room, side, u, v + CHAIR_ZONE, +1), out)
+            _try(room, workstation(room, side, u, v + CHAIR_ZONE + DESK_D, -1), out)
 
 
 def furnish_meeting(room, out, seed):
     side = "n" if room.length("n") >= room.length("w") else "w"
     length, depth = room.length(side), room.depth(side)
-    table_l, table_w = min(4800.0, length - 1800), 1200.0
+    table_l = min(7200.0, length - 1800)
+    table_w = 1500.0 if table_l > 4800 else 1200.0
     if table_l >= 1600 and depth >= table_w + 1600:
-        _try(room, dining_set(room, side, length / 2, depth / 2, table_l, table_w), out)
+        pieces = dining_set(room, side, length / 2, depth / 2, table_l, table_w)
+        pieces[0].name = "meeting table"
+        _try(room, pieces, out)
+    end = "w" if side == "n" else "n"                 # a display on a short wall, facing down the table
+    for wall in (end, room.opposite(end)):
+        u = room.slot(wall, 1600, 60)
+        if u is not None:
+            _try(room, [display(room, wall, u)], out, mounted=True)
+            break
+
+
+def furnish_cafeteria(room, out, seed):
+    wall = room.best_wall(3000, 700, shun=())
+    if wall:
+        _try(room, [servery(room, *wall)], out)
+    side = "n" if room.length("n") >= room.length("w") else "w"
+    length, depth = room.length(side), room.depth(side)
+    table_l, table_w, chairs = 1300.0, 800.0, 480.0
+    for v in _centred(depth, table_w + 2 * chairs, table_w + 2 * chairs + 900.0, EDGE):
+        for u in _centred(length, table_l, table_l + 1000.0, EDGE):
+            pieces = dining_set(room, side, u, v, table_l, table_w)
+            pieces[0].name = "cafe table"
+            _try(room, pieces, out)
+
+
+def furnish_print(room, out, seed):
+    wall = room.best_wall(1100, 700, shun=())
+    if wall:
+        _try(room, [copier(room, *wall)], out)
+    wall = room.best_wall(900, 450, shun=())
+    if wall:
+        _try(room, [cabinet(room, *wall, width=900.0, name="paper cabinet")], out)
 
 
 def furnish_reception(room, out, seed):
@@ -627,7 +756,8 @@ def furnish_reception(room, out, seed):
 
 LAYOUTS = {"living": furnish_living, "dining": furnish_dining, "bedroom": furnish_bedroom, "toilet": furnish_toilet,
            "kitchen": furnish_kitchen, "dress": furnish_dress, "utility": furnish_utility, "office": furnish_office,
-           "meeting": furnish_meeting, "reception": furnish_reception}
+           "meeting": furnish_meeting, "reception": furnish_reception, "cafeteria": furnish_cafeteria,
+           "print": furnish_print}
 
 
 def _split(rect, kinds):
@@ -747,6 +877,30 @@ def _same_room_below(room_label, kinds, rect, rooms, by_storey) -> dict | None:
     return None
 
 
+WORKPLACE_KINDS = {"office", "meeting", "reception", "cafeteria", "print", "it"}
+HOME_KINDS = {"bedroom", "living", "kitchen", "dining", "dress", "utility"}
+MASONRY_WORDS = re.compile(r"\b(?:BRICK|BLOCK|MASONRY|STONE|AAC)\b", re.I)
+
+
+def facade_style(rooms: list[dict[str, Any]], elements: list[dict[str, Any]]) -> dict[str, str]:
+    """
+    How the outside walls look at LOD 500. A wall legend that names brick, block or stone is followed. Otherwise
+    an office building (its room labels are mostly offices, meeting rooms, reception, cafeteria ...) reads as a
+    glass curtain wall, and any other building as brick. Display only: plans seldom state the facade material.
+    """
+    for e in elements:
+        if e.get("element_type") == "wall" and e.get("is_external") and \
+                MASONRY_WORDS.search(f"{e.get('component') or ''} {e.get('wall_type') or ''} {e.get('material') or ''}"):
+            return {"style": "masonry", "basis": f"the drawing names the outside walls: {e.get('wall_type') or e.get('component')}"}
+    kinds = [k for room in rooms for k in room_types(room.get("name", ""))]
+    work = sum(k in WORKPLACE_KINDS for k in kinds)
+    home = sum(k in HOME_KINDS for k in kinds)
+    if work >= 2 and work > home:
+        return {"style": "glass", "basis": f"display only: an office building ({work} workplace rooms such as offices and "
+                                            "meeting rooms); the drawings do not state the facade material"}
+    return {"style": "masonry", "basis": "display only: brick, as the drawings do not state the facade material"}
+
+
 def furnish_building(storeys: list[dict[str, Any]], elements: list[dict[str, Any]],
                      rooms: list[dict[str, Any]], drawn_lines=None) -> tuple[list[dict[str, Any]], list[str]]:
     """
@@ -769,8 +923,17 @@ def furnish_building(storeys: list[dict[str, Any]], elements: list[dict[str, Any
         rect = room_bounds(cx, cy, walls)
         from app.services.equipment import LAYOUTS as PLANT
 
-        largest = PLANT_ROOM_MAX_MM if any(k in PLANT for k in kinds) else ROOM_SIZE_MM[1]
+        open_plan = any(k in OPEN_PLAN_KINDS for k in kinds)
+        largest = (PLANT_ROOM_MAX_MM if any(k in PLANT for k in kinds)
+                   else OPEN_ROOM_MAX_MM if open_plan else ROOM_SIZE_MM[1])
         ok = lambda r: r is not None and all(ROOM_SIZE_MM[0] <= v <= largest for v in (r[2] - r[0], r[3] - r[1]))  # noqa: E731
+        if open_plan:
+            # Columns stand inside open offices and halls: the room is bounded by its walls (the columns stay
+            # obstacles for the furniture).
+            bounded = room_bounds(cx, cy, [r for e in mine if e.get("element_type") in ("wall", "door", "window", "opening")
+                                           for r in ([tuple(x) for x in e["plan_rects"]] if e.get("plan_rects") else [_rect_of(e)])])
+            if ok(bounded):
+                rect = bounded
         basis = "detected walls"
         if not ok(rect) and drawn_lines is not None:
             rect = room_bounds(cx, cy, walls + drawn_lines(storey["placement_id"]))

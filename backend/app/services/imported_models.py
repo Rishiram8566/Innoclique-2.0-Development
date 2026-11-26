@@ -345,6 +345,8 @@ def build_from_imported(models: list[dict[str, Any]], project: dict[str, Any], p
             "plans_excluded": len(excluded),
         },
         "envelope": envelope,
+        # An IFC model states its own materials; drawings seldom state the facade, so it follows the building's use.
+        "facade": None if ifc else furnishing.facade_style(rooms, elements),
         "stair_notes": stair_notes,
         "furniture_notes": furniture_notes,
         "storeys": storeys,

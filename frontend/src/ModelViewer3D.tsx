@@ -1,4 +1,4 @@
-import { Component, Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, Suspense, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Canvas, useLoader, useThree } from '@react-three/fiber';
 import { Bounds, ContactShadows, Html, OrbitControls, useBounds } from '@react-three/drei';
@@ -208,6 +208,43 @@ const REAL = {
   stone: '#7f7b74', band: '#e7e3da', stair: '#d6cfc2',
 };
 
+/**
+ * The building's facade at LOD 500, from the model: 'glass' for an office building (its outside walls read as a
+ * curtain wall), else the drawing's wall finish (brick when the drawings are silent). Display only.
+ */
+const FacadeContext = createContext<string | null>(null);
+const CURTAIN = { mullion: '#3a424e', panel: '#c9d0d8', spandrel: '#6788ae', membrane: '#c3c8ce' };
+let curtainTexture: THREE.CanvasTexture | null = null;
+/** Curtain wall: tinted glass in 1.5 m modules with dark aluminium mullions and transoms, drawn once. */
+function curtainWallTexture(): THREE.CanvasTexture {
+  if (curtainTexture) return curtainTexture;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const sky = ctx.createLinearGradient(0, 0, size, size);
+  sky.addColorStop(0, '#b2cbe4');
+  sky.addColorStop(0.55, '#7fa2c7');
+  sky.addColorStop(1, '#5d80a8');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';                        // a soft reflection across each pane
+  ctx.beginPath();
+  ctx.moveTo(size * 0.18, 0); ctx.lineTo(size * 0.48, 0); ctx.lineTo(size * 0.22, size); ctx.lineTo(0, size);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = CURTAIN.mullion;
+  ctx.fillRect(0, 0, 9, size);                                     // mullion
+  ctx.fillRect(0, 0, size, 7);                                     // transom
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(1 / 1.5, 1 / 1.5);                            // UVs are metres: one 1.5 m module
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  curtainTexture = texture;
+  return texture;
+}
+
 /** Standing-seam roof sheet: a raised seam every 450 mm down the slope, drawn once per colour and direction. */
 const seamTextures = new Map<string, THREE.CanvasTexture>();
 function seamTexture(base: string, ridgeAxis: 'x' | 'y'): THREE.CanvasTexture {
@@ -383,17 +420,24 @@ const Wall = memo(function Wall({
     : type === 'slab' || type === 'roof' ? '#d9dee4' : type === 'water' ? '#5b8fb9' : CONCRETE;
   const realistic = lod === '500' && look === 'realistic' && !colorOverride;
   const realColor = realistic ? realisticColor(element) : undefined;
+  // An office building's outside walls read as glass curtain wall; its parapets as aluminium panels and the
+  // columns in its facade as mullions.
+  const facade = useContext(FacadeContext);
+  const curtain = realistic && facade === 'glass' && element.detected_by !== 'ifc' && isExteriorWall(element)
+    && (type === 'wall' || type === 'parapet' || type === 'column');
+  const curtainWall = curtain && type === 'wall';
+  const curtainTrim = curtain && !curtainWall ? (type === 'parapet' ? CURTAIN.panel : CURTAIN.mullion) : null;
   // At LOD 500 a selected element keeps its finish and glows orange; below 500 it turns solid orange.
   const glow = selected && lod === '500';
   const glowProps = { emissive: glow ? SELECTED : '#000000', emissiveIntensity: glow ? 0.45 : 0 };
   const color = selected && !glow
     ? SELECTED
     : lod === '500'
-      ? (flagged ? REVIEW : colorOverride ?? (realistic ? realColor ?? REAL.brick : element.color ?? componentColor(component)))
+      ? (flagged ? REVIEW : colorOverride ?? (realistic ? curtainTrim ?? realColor ?? REAL.brick : element.color ?? componentColor(component)))
       : byType;
   const seamLook = lod === '500' && !flagged && !colorOverride && type === 'roof' && !!element.roof
     && /standing seam/i.test(element.roof.sheet ?? '');
-  const brickLook = lod === '500' && !flagged && !colorOverride
+  const brickLook = lod === '500' && !flagged && !colorOverride && !curtain
     && (realistic ? realColor === null : isBrick(component, (element as any).material));
   const glass = type === 'window' || component.includes('glass') || component.includes('curtain');
   const shaft = type === 'lift shaft';
@@ -441,7 +485,12 @@ const Wall = memo(function Wall({
               depthWrite={!clear} {...glowProps} />
           </mesh>
         );
-      }) : brickLook && twoFaced && realistic ? (
+      }) : curtainWall ? (
+        <mesh geometry={geometry} receiveShadow {...handlers}>
+          <meshStandardMaterial map={curtainWallTexture()} roughness={0.12} metalness={0.45} side={THREE.DoubleSide}
+            transparent opacity={0.86} depthWrite={false} {...glowProps} />
+        </mesh>
+      ) : brickLook && twoFaced && realistic ? (
         <mesh geometry={twoFaced} castShadow receiveShadow {...handlers}>
           <meshStandardMaterial attach="material-0" map={brickTexture(REAL.brick)} roughness={0.9} metalness={0}
             side={THREE.DoubleSide} {...glowProps} />
@@ -670,6 +719,9 @@ const Opening = memo(function Opening({
   inward?: [number, number, number];
 }) {
   const o = element.opening!;
+  // A window in an office building's glass facade has dark aluminium frames, like the curtain wall round it.
+  const facade = useContext(FacadeContext);
+  const windowFrame = facade === 'glass' && element.is_external ? CURTAIN.mullion : WINDOW_FRAME;
   const parts = useMemo(() => {
     const vs = element.mesh.vertices;
     const xs = vs.map(v => v[0]), ys = vs.map(v => v[1]), zs = vs.map(v => v[2]);
@@ -727,7 +779,7 @@ const Opening = memo(function Opening({
       const exterior = !!element.is_external;
       const leafColor = selected ? SELECTED : exterior ? DOOR_PAINT : DOOR_WOOD;
       const panelColor = selected ? SELECTED : exterior ? DOOR_PAINT_PANEL : DOOR_WOOD_PANEL;
-      const frameColor = exterior ? WINDOW_FRAME : DOOR_FRAME;
+      const frameColor = exterior ? windowFrame : DOOR_FRAME;
       const leaves = a1 - a0 >= 1100 ? 2 : 1;
       const leafWidth = (a1 - a0 - 2 * FRAME_MM) / leaves;
       const leaf = across(0.18);
@@ -757,24 +809,24 @@ const Opening = memo(function Opening({
       const glass = across(0.1);
       list.push(box(a0 + FRAME_MM, a1 - FRAME_MM, glass, sill + FRAME_MM, head - FRAME_MM, selected ? SELECTED : GLASS, 0.4));
       const depth = across(0.5);
-      list.push(box(a0, a0 + FRAME_MM, depth, sill, head, WINDOW_FRAME), box(a1 - FRAME_MM, a1, depth, sill, head, WINDOW_FRAME),
-        box(a0, a1, depth, head - FRAME_MM, head, WINDOW_FRAME), box(a0, a1, depth, sill, sill + FRAME_MM, WINDOW_FRAME));
+      list.push(box(a0, a0 + FRAME_MM, depth, sill, head, windowFrame), box(a1 - FRAME_MM, a1, depth, sill, head, windowFrame),
+        box(a0, a1, depth, head - FRAME_MM, head, windowFrame), box(a0, a1, depth, sill, sill + FRAME_MM, windowFrame));
       // Glazing bars: a vertical bar about every 600 mm and one across the middle.
       const bars = across(0.25);
       const bays = Math.max(2, Math.round((a1 - a0) / 600));
       for (let k = 1; k < bays; k += 1) {
         const at = a0 + ((a1 - a0) * k) / bays;
-        list.push(box(at - MUNTIN_MM / 2, at + MUNTIN_MM / 2, bars, sill + FRAME_MM, head - FRAME_MM, WINDOW_FRAME));
+        list.push(box(at - MUNTIN_MM / 2, at + MUNTIN_MM / 2, bars, sill + FRAME_MM, head - FRAME_MM, windowFrame));
       }
       if (head - sill > 700) {
         const mid = (sill + head) / 2;
-        list.push(box(a0 + FRAME_MM, a1 - FRAME_MM, bars, mid - MUNTIN_MM / 2, mid + MUNTIN_MM / 2, WINDOW_FRAME));
+        list.push(box(a0 + FRAME_MM, a1 - FRAME_MM, bars, mid - MUNTIN_MM / 2, mid + MUNTIN_MM / 2, windowFrame));
       }
       // Sill projecting from both wall faces, and trims round the opening.
       const [lo, hi] = full;
       list.push(box(a0 - SILL_OVERHANG_MM, a1 + SILL_OVERHANG_MM, [lo - SILL_OVERHANG_MM, hi + SILL_OVERHANG_MM],
         sill - SILL_HEIGHT_MM, sill, SILL_STONE));
-      trims(sill, WINDOW_FRAME);
+      trims(sill, windowFrame);
     } else if (element.element_type === 'door') {
       list.push(box(a0 + inset, a1 - inset, across(0.18), z0, head - inset, selected ? SELECTED : DOOR_WOOD));
       if (framed) {
@@ -786,16 +838,16 @@ const Opening = memo(function Opening({
       list.push(box(a0 + inset, a1 - inset, across(0.1), sill + inset, head - inset, selected ? SELECTED : GLASS, 0.45));
       if (framed) {
         const depth = across(0.5);
-        list.push(box(a0, a0 + FRAME_MM, depth, sill, head, WINDOW_FRAME), box(a1 - FRAME_MM, a1, depth, sill, head, WINDOW_FRAME),
-          box(a0, a1, depth, head - FRAME_MM, head, WINDOW_FRAME), box(a0, a1, depth, sill, sill + FRAME_MM, WINDOW_FRAME));
+        list.push(box(a0, a0 + FRAME_MM, depth, sill, head, windowFrame), box(a1 - FRAME_MM, a1, depth, sill, head, windowFrame),
+          box(a0, a1, depth, head - FRAME_MM, head, windowFrame), box(a0, a1, depth, sill, sill + FRAME_MM, windowFrame));
         if (a1 - a0 > 1200) {
           const mid = (a0 + a1) / 2;
-          list.push(box(mid - FRAME_MM / 2, mid + FRAME_MM / 2, depth, sill, head, WINDOW_FRAME));
+          list.push(box(mid - FRAME_MM / 2, mid + FRAME_MM / 2, depth, sill, head, windowFrame));
         }
       }
     }
     return { list, top: toThree([(x0 + x1) / 2, (y0 + y1) / 2, head + 400]) };
-  }, [element, lod, selected, hostColor, o, inward]);
+  }, [element, lod, selected, hostColor, o, inward, windowFrame]);
 
   const click = (event: any) => {
     event.stopPropagation();
@@ -1155,6 +1207,7 @@ type BuildingElement = MeshElement & {
 };
 
 type BuildingResponse = {
+  facade?: { style: string; basis: string } | null;
   summary: {
     placed_plans: number; plans_in_model: number; walls_served: number; walls_withheld: number; plans_excluded: number;
     walls_superseded?: number; walls_joined?: number; columns_to_review?: number;
@@ -1307,6 +1360,8 @@ function Slab({ slab, opacity, finish }: { slab: SlabData; opacity: number; fini
 }
 
 function SlabPlate({ slab, opacity, finish }: { slab: SlabData; opacity: number; finish?: 'roof' | 'floor' | 'ceiling' }) {
+  // An office building's flat roof is a grey membrane, not clay tiles.
+  const facade = useContext(FacadeContext);
   // At LOD 500 the roof sits a hair above the wall tops so their outlines do not show through it.
   const y = slab.elevation_mm / MM_PER_M + (finish === 'roof' ? 0.02 : 0);
   const { plate, outline } = useMemo(() => {
@@ -1359,7 +1414,9 @@ function SlabPlate({ slab, opacity, finish }: { slab: SlabData; opacity: number;
   if (finish) {
     return (
       <mesh geometry={plate} receiveShadow castShadow={finish === 'roof'}>
-        {finish === 'roof' ? (
+        {finish === 'roof' && facade === 'glass' ? (
+          <meshStandardMaterial color={CURTAIN.membrane} roughness={0.95} side={THREE.DoubleSide} />
+        ) : finish === 'roof' ? (
           <meshStandardMaterial map={roofTileTexture(REAL.roof)} roughness={0.85} side={THREE.DoubleSide} />
         ) : (
           <meshStandardMaterial color={finish === 'ceiling' ? REAL.ceiling : REAL.floor} roughness={0.9}
@@ -1744,7 +1801,37 @@ function BuildingView({ projectId }: { projectId: string }) {
                 ))}
               </div>
             )}
+            {lod === '500' && hasRoof && (
+              <div className="seg" role="group" aria-label="Roof">
+                <span className="seg-label">Roof</span>
+                <button className={showRoof ? 'on' : ''} onClick={() => setShowRoof(true)}>Show</button>
+                <button className={!showRoof ? 'on' : ''} onClick={() => setShowRoof(false)}>Hide</button>
+              </div>
+            )}
+            {lod === '500' && (data.rooms ?? []).length > 0 && (
+              <div className="seg" role="group" aria-label="Room names">
+                <span className="seg-label">Room names</span>
+                {/* The names stand inside the rooms: showing them lifts the roof off. */}
+                <button className={roomsVisible ? 'on' : ''}
+                  onClick={() => { setShowRooms(true); if (!roofOff) setShowRoof(false); }}>Show</button>
+                <button className={!roomsVisible ? 'on' : ''} onClick={() => setShowRooms(false)}>Hide</button>
+              </div>
+            )}
+            {lod === '500' && furnitureCount > 0 && (
+              <div className="seg" role="group" aria-label="Furniture">
+                <span className="seg-label">Furniture</span>
+                <button className={showFurniture ? 'on' : ''} onClick={() => setShowFurniture(true)}>Show</button>
+                <button className={!showFurniture ? 'on' : ''} onClick={() => setShowFurniture(false)}>Hide</button>
+              </div>
+            )}
           </div>
+          {lod === '500' && (data.rooms ?? []).length > 0 && !roomView && (
+            <div className="viewer-hint">
+              {roomsVisible
+                ? 'Click a room name to walk into that room and look around 360°. Press Esc to come back out.'
+                : 'Show the room names to see every room, then click one to walk in and look around 360°.'}
+            </div>
+          )}
         </>
       )}
 
@@ -1802,6 +1889,7 @@ function BuildingView({ projectId }: { projectId: string }) {
                   return <pointLight position={toThree([(b0 + b2) / 2, (b1 + b3) / 2, floorZ + 2500])}
                     intensity={18} distance={14} decay={2} color="#fff3e0" />;
                 })()}
+                <FacadeContext.Provider value={data.facade?.style ?? null}>
                 <group onPointerMissed={() => setSelectedId(null)}>
                   {visible.map(element => isOpening(element) ? (
                     <Opening
@@ -1812,10 +1900,11 @@ function BuildingView({ projectId }: { projectId: string }) {
                       onSelect={setSelectedId}
                       hovered={element.element_id === hoveredId}
                       onHover={setHoveredId}
-                      inward={lod === '500' && colorBy === 'realistic' && element.is_external
+                      inward={lod === '500' && colorBy === 'realistic' && element.is_external && data.facade?.style !== 'glass'
                         ? storeyCentre[element.storey.placement_id] : undefined}
                       hostColor={lod !== '500' ? CONCRETE
                         : colorBy === 'storey' ? storeyColor[element.storey.placement_id]
+                        : colorBy === 'realistic' && data.facade?.style === 'glass' && element.is_external ? CURTAIN.spandrel
                         : colorBy === 'realistic'
                           ? (wallFinish(element.host_component ?? '',
                               element.is_external ?? /brick|exterior|external/i.test(element.host_component ?? '')) ?? REAL.brick)
@@ -1870,6 +1959,7 @@ function BuildingView({ projectId }: { projectId: string }) {
                     </Html>
                   ))}
                 </group>
+                </FacadeContext.Provider>
               </Bounds>
               {lod !== '500' && <gridHelper args={[300, 60, '#b6c2cf', '#dbe2ea']} position={[30, groundY, 40]} />}
               <ContactShadows position={[30, groundY + 0.01, 40]} scale={200} blur={2.5} far={40}
@@ -1928,28 +2018,6 @@ function BuildingView({ projectId }: { projectId: string }) {
                 <button onClick={() => setColorBy('realistic')} style={lodButton(colorBy === 'realistic')}>Realistic</button>
                 <button onClick={() => setColorBy('type')} style={lodButton(colorBy === 'type')}>Element type</button>
                 <button onClick={() => setColorBy('storey')} style={lodButton(colorBy === 'storey')}>Storey</button>
-                {hasRoof && (
-                  <>
-                    <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Roof</span>
-                    <button onClick={() => setShowRoof(true)} style={lodButton(showRoof)}>Show</button>
-                    <button onClick={() => setShowRoof(false)} style={lodButton(!showRoof)}>Hide</button>
-                  </>
-                )}
-                {furnitureCount > 0 && (
-                  <>
-                    <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Furniture</span>
-                    <button onClick={() => setShowFurniture(true)} style={lodButton(showFurniture)}>Show</button>
-                    <button onClick={() => setShowFurniture(false)} style={lodButton(!showFurniture)}>Hide</button>
-                  </>
-                )}
-                <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 12 }}>Room names</span>
-                <button onClick={() => setShowRooms(true)} style={lodButton(showRooms)}>Show</button>
-                <button onClick={() => setShowRooms(false)} style={lodButton(!showRooms)}>Hide</button>
-                {showRooms && !roofOff && (
-                  <span style={{ color: 'var(--muted)', fontSize: 12 }}>
-                    ({floors.length > 1 ? 'pick a floor below, or hide the roof, to see them' : 'hide the roof to see them'})
-                  </span>
-                )}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', fontSize: 12 }}>
                 {legend.map(item => (

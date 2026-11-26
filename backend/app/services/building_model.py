@@ -355,6 +355,7 @@ def build_building_model(project_folder: Path, project_id: str) -> dict[str, Any
             "plans_excluded": len(excluded),
         },
         "envelope": envelope,
+        "facade": furnishing.facade_style(rooms, elements),
         "stair_notes": stair_notes,
         "furniture_notes": furniture_notes,
         "storeys": storeys,

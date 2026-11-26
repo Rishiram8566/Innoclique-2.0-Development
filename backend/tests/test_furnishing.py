@@ -193,3 +193,75 @@ def test_equipment_drawn_in_cad_replaces_the_indicative_layout_and_double_height
     notes = fu.open_double_height_rooms(rooms, [slab])
     assert notes and slab["openings"][0]["rect_mm"] == rooms[1]["bounds_mm"]
     assert all(not (r[0] < 4500 < r[2] and r[1] < 3500 < r[3]) for r in slab["footprint"]["rects_mm"])
+
+
+def test_office_and_workplace_labels_are_read():
+    from app.services.drawing_text_facts import room_label
+
+    for label in ("OPEN PLAN OFFICE", "OPEN-PLAN OFFICE", "WORKSTATIONS", "STAFF CAFETERIA", "BREAK-OUT AREA",
+                  "PRINT ROOM", "BOARD ROOM", "CO-WORKING"):
+        assert room_label(label) == label, label
+    assert room_label("GROUND FLOOR PLAN") is None and room_label("OFFICE LAYOUT PLAN") is None
+    assert fu.room_types("OPEN OFFICE") == ["office"] and fu.room_types("WORKSTATIONS") == ["office"]
+    assert fu.room_types("STAFF CAFETERIA") == ["cafeteria"] and fu.room_types("BREAK-OUT AREA") == ["cafeteria"]
+    assert fu.room_types("COPY / PRINT") == ["print"] and fu.room_types("BOARD ROOM") == ["meeting"]
+    assert fu.room_types("SERVER ROOM") == ["it"]
+
+
+def overlaps(a, b):
+    return a[0] < b[2] - 1 and b[0] < a[2] - 1 and a[1] < b[3] - 1 and b[1] < a[3] - 1
+
+
+def test_open_plan_office_is_filled_with_workstation_rows_round_its_columns():
+    room = (0.0, 0.0, 20000.0, 12000.0)                       # wider than a home's room (15 m)
+    columns = [element("c1", (9700, 5700, 10300, 6300), "column"), element("c2", (4300, 3000, 4900, 3600), "column")]
+    walls = room_walls(*room, door_south=(9000, 10000)) + columns
+    # The label stands in line with a column: the room is still the whole space between the walls.
+    items, _ = furnish("OPEN PLAN OFFICE", walls, (10000, 3000))
+    desks = [e for e in items if e["component"] == "workstation desk"]
+    chairs = [e for e in items if e["component"] == "office chair"]
+    assert 24 <= len(desks) <= 32 and len(chairs) == len(desks)
+    door_zone = (8950, 11000, 10050, 12000)
+    for e in items:
+        r = rect(e)
+        assert inside(r, room)
+        assert not any(overlaps(r, rect(c)) for c in columns) and not overlaps(r, door_zone)
+    assert len({round(rect(d)[1]) for d in desks}) >= 4          # two rows, each of back-to-back desks
+    assert all(e["provenance"]["room_type"] == "office" for e in items)
+
+
+def test_small_office_gets_a_desk_and_a_cabinet():
+    room = (0.0, 0.0, 4000.0, 4500.0)
+    items, _ = furnish("OFFICE", room_walls(*room, door_south=(500, 1400)), (2000, 2000))
+    names = sorted(e["component"] for e in items)
+    assert names == ["desk", "office chair", "storage cabinet"]
+
+
+def test_board_room_table_grows_with_the_room_and_faces_a_display():
+    room = (0.0, 0.0, 9000.0, 5000.0)
+    items, _ = furnish("BOARD ROOM", room_walls(*room, door_south=(500, 1400)), (4500, 2500))
+    table = next(e for e in items if e["component"] == "meeting table")
+    assert table["dimensions_mm"]["length"] == 7200 and table["dimensions_mm"]["thickness"] == 1500
+    assert sum(e["component"] == "chair" for e in items) >= 16
+    assert any(e["component"] == "display screen" for e in items)
+
+
+def test_cafeteria_and_print_room():
+    room = (0.0, 0.0, 14000.0, 9000.0)
+    items, _ = furnish("STAFF CAFETERIA", room_walls(*room, door_south=(500, 1400)), (7000, 4500))
+    tables = [e for e in items if e["component"] == "cafe table"]
+    assert sum(e["component"] == "servery counter" for e in items) == 1
+    assert len(tables) >= 6 and sum(e["component"] == "chair" for e in items) == 4 * len(tables)
+    small = (0.0, 0.0, 3000.0, 3000.0)
+    items, _ = furnish("PRINT ROOM", room_walls(*small, door_south=(200, 1100)), (1500, 1500))
+    assert sorted(e["component"] for e in items) == ["paper cabinet", "printer / copier"]
+
+
+def test_office_buildings_get_a_glass_facade_unless_the_drawing_names_masonry():
+    offices = [{"name": n} for n in ("OPEN PLAN OFFICE", "MEETING ROOM", "CAFETERIA", "TOILET")]
+    homes = [{"name": n} for n in ("BEDROOM 1", "KITCHEN", "LIVING", "STUDY")]
+    assert fu.facade_style(offices, [])["style"] == "glass"
+    assert fu.facade_style(homes, [])["style"] == "masonry"
+    brick = [{"element_type": "wall", "is_external": True, "component": "wall", "wall_type": "230 THK. BRICK MASONRY WALL"}]
+    stated = fu.facade_style(offices, brick)
+    assert stated["style"] == "masonry" and "BRICK" in stated["basis"]
