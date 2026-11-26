@@ -72,7 +72,11 @@ BOX_FACES = od.BOX_FACES
 EQUIP_LAYER = re.compile(r"EQ[PM]|EQUI?P|CHLR|CHILLER|PUMP|TANK|GENSET|GENERATOR|\bAHU\b|TRANSFORMER|SWGR|"
                          r"SWITCHGEAR|PANEL|FURN", re.IGNORECASE)
 EQUIP_NAME = re.compile(r"CHILLER|PUMP|TRANSFORMER|\d\s?KVA|GENSET|GENERATOR|\bAHU\b|AIR HANDLING|TANK|PANEL|\bACB\b|PFCC|\bMCC\b|"
-                        r"SMDB|\bMDB\b|LVDB|\bUPS\b|BATTER|RACK|CHAIR|DESK|TABLE|SOFA|\bBED\b", re.IGNORECASE)
+                        r"SMDB|\bMDB\b|LVDB|\bUPS\b|BATTER|RACK|CHAIR|DESK|TABLE|SOFA|"
+                        # Furniture and sanitary blocks, as architects name them (BED_DOUBLE, M_Bed-Standard, EWC ...).
+                        r"(?<![A-Z])BEDS?(?![A-Z])|BED[_-]|COUCH|SETTEE|WARDROBE|CUPBOARD|ALMIRAH|WORKSTATION|DINING|"
+                        r"(?<![A-Z])E?W\.?C(?![A-Z])|TOILET|COMMODE|BASIN|VANITY|SINK|COUNTER|FRIDGE|REFRIG|BATH ?TUB|"
+                        r"BOOK ?(?:CASE|SHELF)|SHELF|(?<![A-Z])TV(?![A-Z])", re.IGNORECASE)
 EQUIP_SKIP = re.compile(r"FUTURE|\bFUT\b|BIKE|DEVC|DEVICE|DVIC|TAG|SYMB|ANNO|TEXT|PLINTH|TROLL|LCD|MONITOR|KEYBOARD|MOUSE|"
                         r"PHONE|SUPPORT|CHAMBER|PIPE|ACCS|GRID|FNDN|HIDDEN", re.IGNORECASE)
 EQUIP_SIZE_MM = (300.0, 15000.0)
@@ -90,11 +94,56 @@ EQUIP_KINDS = [
     ("UPS / battery rack", re.compile(r"\bUPS\b|BATTER", re.I), 2000.0, "#4a4f57"),
     ("server rack", re.compile(r"RACK|SERVER", re.I), 2100.0, "#2b2f36"),
     ("hose reel cabinet", re.compile(r"HOSE|FHC", re.I), 1500.0, "#b8322b"),
-    ("chair", re.compile(r"CHAIR", re.I), 900.0, "#3a3a3a"),
-    ("desk", re.compile(r"DESK|TABLE|WORKSTATION", re.I), 750.0, "#8a6a4a"),
+    # Furniture and fittings (heights typical, display only; shapes in FURNITURE_BANDS).
+    ("armchair", re.compile(r"ARM ?CHAIR|EASY ?CHAIR", re.I), 480.0, "#5d6b7d"),
+    ("chair", re.compile(r"CHAIR", re.I), 460.0, "#3a3a3a"),
+    ("desk", re.compile(r"DESK|WORK ?STATION", re.I), 750.0, "#e9e4da"),
+    ("table", re.compile(r"TABLE|DINING", re.I), 750.0, "#8a6a4a"),
+    ("sofa", re.compile(r"SOFA|COUCH|SETTEE|LOUNGER", re.I), 480.0, "#5d6b7d"),
+    ("bed", re.compile(r"(?<![A-Z])BEDS?(?![A-Z])|BED[_-]", re.I), 560.0, "#ece7dc"),
+    ("wardrobe", re.compile(r"WARDROBE|CUPBOARD|ALMIRAH|CLOSET", re.I), 2100.0, "#7a5234"),
+    ("wc", re.compile(r"(?<![A-Z])E?W\.?C(?![A-Z])|TOILET|COMMODE|WATER ?CLOSET", re.I), 420.0, "#f7f7f4"),
+    ("washbasin", re.compile(r"BASIN|LAVATORY|VANITY|WASH ?HAND", re.I), 860.0, "#f7f7f4"),
+    ("kitchen sink", re.compile(r"SINK", re.I), 900.0, "#d9d2c5"),
+    ("kitchen counter", re.compile(r"COUNTER|WORKTOP|KITCHEN ?(?:UNIT|CAB)", re.I), 900.0, "#d9d2c5"),
+    ("refrigerator", re.compile(r"FRIDGE|REFRIG", re.I), 1800.0, "#e9eaec"),
+    ("bathtub", re.compile(r"BATH ?TUB|(?<![A-Z])BATH(?!ROOM)", re.I), 560.0, "#f7f7f4"),
+    ("tv unit", re.compile(r"(?<![A-Z])TV(?![A-Z])|TELEVISION", re.I), 1100.0, "#7a5234"),
+    ("shelf", re.compile(r"BOOK ?(?:CASE|SHELF|RACK)|SHOE ?RACK|SHELF|SHELV", re.I), 1800.0, "#b98c5c"),
     ("electrical panel", re.compile(r"ELEC|POWR|PANEL|\bACB\b|PFCC|\bMCC\b|SMDB|\bMDB\b|LVDB|SWGR|SWITCH", re.I),
      2200.0, "#c4c8cc"),
+    ("furniture", re.compile(r"FURN", re.I), 750.0, "#b98c5c"),     # any other block on a furniture layer
 ]
+# Furniture read from a block is drawn in layers (z from, z to, colour, share of the footprint), so a bed has
+# its base, mattress and cover and a table its top on a stand. The block's orientation is not known, so
+# backs (sofa, chair) are not drawn. Display only.
+FURNITURE_BANDS = {
+    "bed": [(0.0, 300.0, "#7a5234", 1.0), (300.0, 520.0, "#ece7dc", 0.97), (520.0, 560.0, "#6f839c", 0.9)],
+    "sofa": [(0.0, 420.0, "#5d6b7d", 1.0), (420.0, 480.0, "#c9b79c", 0.85)],
+    "armchair": [(0.0, 420.0, "#5d6b7d", 1.0), (420.0, 480.0, "#c9b79c", 0.85)],
+    "chair": [(0.0, 460.0, "#3a3a3a", 0.9)],
+    "desk": [(0.0, 710.0, "#5b5f66", 0.15), (710.0, 750.0, "#e9e4da", 1.0)],
+    "table": [(0.0, 710.0, "#5a4330", 0.15), (710.0, 750.0, "#8a6a4a", 1.0)],
+    "wardrobe": [(0.0, 2100.0, "#7a5234", 1.0)],
+    "wc": [(0.0, 420.0, "#f7f7f4", 0.85)],
+    "washbasin": [(0.0, 780.0, "#f7f7f4", 0.25), (780.0, 860.0, "#f7f7f4", 1.0)],
+    "kitchen sink": [(0.0, 860.0, "#d9d2c5", 1.0), (860.0, 900.0, "#9aa0a6", 1.0)],
+    "kitchen counter": [(0.0, 860.0, "#d9d2c5", 1.0), (860.0, 900.0, "#34353a", 1.0)],
+    "refrigerator": [(0.0, 1800.0, "#e9eaec", 1.0)],
+    "bathtub": [(0.0, 560.0, "#f7f7f4", 1.0)],
+    "tv unit": [(0.0, 450.0, "#7a5234", 1.0), (450.0, 1100.0, "#0d1014", 0.5)],
+    "shelf": [(0.0, 1800.0, "#b98c5c", 1.0)],
+    "furniture": [(0.0, 750.0, "#b98c5c", 1.0)],
+}
+
+
+def _inset(poly, share: float):
+    """The outline shrunk about its centre to `share` of its size (a table's stand, a basin's pedestal)."""
+    if share >= 1.0:
+        return poly
+    cx = sum(x for x, _ in poly) / len(poly)
+    cy = sum(y for _, y in poly) / len(poly)
+    return [(cx + (x - cx) * share, cy + (y - cy) * share) for x, y in poly]
 EQUIP_DEFAULT = ("equipment", 1500.0, "#9aa3ab")
 EQUIP_PLINTH = {"cooling tower", "chiller", "transformer", "generator set", "pump set", "air handling unit", "tank", "electrical panel",
                 "UPS / battery rack", "equipment"}
@@ -699,9 +748,14 @@ def _cylinder(cx, cy, r, z0, z1, n: int = 32):
 
 def _equipment_mesh(poly_building, base, kind, height, colour, fans=()):
     vertices, faces, parts = [], [], []
-    bands = [(0.0, PLINTH_MM, PLINTH_COLOUR), (PLINTH_MM, height, colour)] if kind in EQUIP_PLINTH else [(0.0, height, colour)]
-    for z0, z1, part_colour in bands:
-        v, fs = _prism(poly_building, base + z0, base + z1)
+    if kind in FURNITURE_BANDS:
+        bands = FURNITURE_BANDS[kind]
+    elif kind in EQUIP_PLINTH:
+        bands = [(0.0, PLINTH_MM, PLINTH_COLOUR, 1.0), (PLINTH_MM, height, colour, 1.0)]
+    else:
+        bands = [(0.0, height, colour, 1.0)]
+    for z0, z1, part_colour, share in bands:
+        v, fs = _prism(_inset(poly_building, share), base + z0, base + z1)
         offset = len(vertices)
         vertices += [[round(x, 1), round(y, 1), round(z, 1)] for x, y, z in v]
         shifted = [[offset + i for i in face] for face in fs]

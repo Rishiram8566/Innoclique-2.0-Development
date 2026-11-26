@@ -17,7 +17,7 @@ from typing import Any
 from app.services import height_verification_ledger as ledger_service
 
 IMPORTED_DIR = "imported"
-IMPORTER_VERSION = 13            # bump when the readers change, so stored imports are refreshed
+IMPORTER_VERSION = 14            # bump when the readers change, so stored imports are refreshed
 MODEL_TYPES = {".ifc": "ifc", ".dxf": "dxf"}
 
 
@@ -313,6 +313,22 @@ def build_from_imported(models: list[dict[str, Any]], project: dict[str, Any], p
                   "reason": f"Reference sheet ({cad_sheet_role(r['filename'])[1]}): not modelled."}
                  for r in model_records(project) if r["model_type"] == "dxf"
                  and cad_sheet_role(r["filename"])[0] == "reference"]
+    facade = None
+    if ifc:
+        # An IFC model brings its own furniture and materials. Spaces it leaves empty are furnished like a
+        # drawing's rooms (by their names), and a model with no materials gets the default finishes.
+        from app.services import furnishing, roof_assembly
+
+        coloured = any(e.get("color") or e.get("mesh_parts") for e in elements
+                       if e.get("element_type") in ("wall", "slab", "roof", "column"))
+        if not coloured:
+            if all(e.get("is_external") is None for e in elements if e.get("element_type") == "wall"):
+                roof_assembly.mark_exterior(storeys, elements)
+            facade = furnishing.facade_style(rooms, elements)
+        furniture, furniture_notes = furnishing.furnish_building(storeys, elements, rooms)
+        elements.extend(furniture)
+    else:
+        facade = furnishing.facade_style(rooms, elements)
     count = lambda kind: sum(1 for e in elements if e.get("element_type") == kind)   # noqa: E731
     source = "IFC" if ifc else "DXF"
     return {
@@ -345,8 +361,8 @@ def build_from_imported(models: list[dict[str, Any]], project: dict[str, Any], p
             "plans_excluded": len(excluded),
         },
         "envelope": envelope,
-        # An IFC model states its own materials; drawings seldom state the facade, so it follows the building's use.
-        "facade": None if ifc else furnishing.facade_style(rooms, elements),
+        # Drawings seldom state the facade, so it follows the building's use; an IFC model with materials keeps them.
+        "facade": facade,
         "stair_notes": stair_notes,
         "furniture_notes": furniture_notes,
         "storeys": storeys,

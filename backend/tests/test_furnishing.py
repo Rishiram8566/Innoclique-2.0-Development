@@ -183,7 +183,7 @@ def test_equipment_drawn_in_cad_replaces_the_indicative_layout_and_double_height
     furniture, notes = fu.furnish_building([STOREY], walls + [drawn], [
         {"name": "FIRE PUMP ROOM", "position_mm": [4500, 1500, 0.0], "storey": {"placement_id": "g"}}])
     assert furniture == [] and drawn["furniture"]["room"] == "FIRE PUMP ROOM"
-    assert any("drawn in the CAD file" in n for n in notes)
+    assert any("equipment from the CAD file" in n for n in notes)
 
     upper = {**STOREY, "placement_id": "u", "base_level_key": "SSL@+4300mm", "base_elevation_mm": 4300.0}
     lifted = [{**w, "storey": {"placement_id": "u", "base_level_key": "SSL@+4300mm", "base_elevation_mm": 4300.0}} for w in walls]
@@ -265,3 +265,33 @@ def test_office_buildings_get_a_glass_facade_unless_the_drawing_names_masonry():
     brick = [{"element_type": "wall", "is_external": True, "component": "wall", "wall_type": "230 THK. BRICK MASONRY WALL"}]
     stated = fu.facade_style(offices, brick)
     assert stated["style"] == "masonry" and "BRICK" in stated["basis"]
+
+
+def drawn_item(element_id, r, component, source="cad_block"):
+    item = element(element_id, r, "furniture")
+    item.update(detected_by=source, component=component, furniture={"room": None, "drawn": True}, provenance={})
+    return item
+
+
+def test_an_empty_ifc_space_is_furnished_and_a_modelled_one_is_left_alone():
+    def space(name):
+        return [{"name": name, "position_mm": [2500.0, 2000.0, 300.0], "size_mm": [5000, 4000],
+                 "source": "IfcSpace in the IFC model", "storey": {"placement_id": "g"}}]
+    # No walls are needed: the IFC space gives the room's extent.
+    items, _ = fu.furnish_building([STOREY], [], space("BEDROOM 1"))
+    assert any(e["component"] == "bed" for e in items)
+    assert all(inside(rect(e), (0.0, 0.0, 5000.0, 4000.0)) for e in items)
+    modelled = drawn_item("ifc-bed", (1000, 1000, 2600, 3000), "double bed", source="ifc")
+    items, notes = fu.furnish_building([STOREY], [modelled], space("BEDROOM 1"))
+    assert items == [] and any("from the IFC model" in n for n in notes)
+
+
+def test_furniture_drawn_in_cad_replaces_the_default_layout_but_does_not_equip_a_plant_room():
+    room = (0.0, 0.0, 6000.0, 5000.0)
+    desks = [drawn_item("d1", (1000, 1000, 2400, 1700), "desk"), drawn_item("c1", (1400, 1800, 1900, 2300), "chair")]
+    items, notes = furnish("OPEN PLAN OFFICE", room_walls(*room, door_south=(500, 1400)) + desks, (3000, 2500))
+    assert items == [] and any("2 item(s) of furniture from the CAD file" in n for n in notes)
+    pump_room = (0.0, 0.0, 8000.0, 6000.0)
+    chair = [drawn_item("c2", (6000, 1000, 6500, 1500), "chair")]
+    items, _ = furnish("FIRE PUMP ROOM", room_walls(*pump_room, door_south=(500, 1700)) + chair, (4000, 3000))
+    assert any(e["component"] == "pump set" for e in items)

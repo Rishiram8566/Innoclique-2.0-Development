@@ -323,6 +323,10 @@ function realisticColor(element: MeshElement): string | null {
   // (e.g. dark aluminium fins) instead of the generic finish used for drawings.
   if (element.detected_by === 'ifc' && element.color
       && ['window muntin', 'trim', 'fascia', 'column', 'beam', 'slab', 'member'].includes(type)) return element.color;
+  // Its walls keep their own material too: brick shows as brick, any other material in its own colour.
+  if (element.detected_by === 'ifc' && element.color && (type === 'wall' || type === 'parapet')) {
+    return /brick/i.test(material) ? null : element.color;
+  }
   if (type === 'wall' || type === 'parapet') return wallFinish(material, isExteriorWall(element));
   if (type === 'column' && element.host_component) return wallFinish(element.host_component, isExteriorWall(element));
   if (type === 'chimney') return null;
@@ -423,10 +427,12 @@ const Wall = memo(function Wall({
   // An office building's outside walls read as glass curtain wall; its parapets as aluminium panels and the
   // columns in its facade as mullions.
   const facade = useContext(FacadeContext);
-  const curtain = realistic && facade === 'glass' && element.detected_by !== 'ifc' && isExteriorWall(element)
-    && (type === 'wall' || type === 'parapet' || type === 'column');
+  // (An IFC element with its own material keeps it; only elements the files leave without one get this look.)
+  const curtain = realistic && facade === 'glass' && !(element.detected_by === 'ifc' && element.color)
+    && isExteriorWall(element) && (type === 'wall' || type === 'parapet' || type === 'column');
   const curtainWall = curtain && type === 'wall';
-  const curtainTrim = curtain && !curtainWall ? (type === 'parapet' ? CURTAIN.panel : CURTAIN.mullion) : null;
+  const curtainTrim = curtain && !curtainWall ? (type === 'parapet' ? CURTAIN.panel : CURTAIN.mullion)
+    : realistic && facade === 'glass' && type === 'roof' && !element.color ? CURTAIN.membrane : null;
   // At LOD 500 a selected element keeps its finish and glows orange; below 500 it turns solid orange.
   const glow = selected && lod === '500';
   const glowProps = { emissive: glow ? SELECTED : '#000000', emissiveIntensity: glow ? 0.45 : 0 };
@@ -1586,6 +1592,16 @@ function BuildingView({ projectId }: { projectId: string }) {
 
   const floors = useMemo(
     () => [...(data?.storeys ?? [])].sort((a, b) => a.base_elevation_mm - b.base_elevation_mm), [data]);
+  // A model may build its roof as a plain slab (an IFC 'Roof slab' without its roof type): a slab of the top
+  // floor standing 2 m or more above that floor's level is its roof, so it lifts off like any roof.
+  const roofSlabs = useMemo(() => {
+    const top = floors[floors.length - 1];
+    if (!top) return new Set<string>();
+    return new Set((data?.elements ?? [])
+      .filter(e => e.element_type === 'slab' && e.storey.placement_id === top.placement_id
+        && Math.min(...e.mesh.vertices.map(v => v[2])) >= top.base_elevation_mm + 2000)
+      .map(e => e.element_id));
+  }, [data, floors]);
   // The picked floor: every floor above it is hidden, so it is seen from above with its rooms and furniture.
   const pickedFloor = useMemo(() => {
     if (!hidden.size) return 'all';
@@ -1656,9 +1672,10 @@ function BuildingView({ projectId }: { projectId: string }) {
     () => (data?.elements ?? []).filter(
       e => Number(lod) >= (e.lod?.minimum_lod ?? 300) && Number(lod) <= (e.lod?.maximum_lod ?? 500)
         && !hidden.has(e.storey.placement_id)
-        && !(lod === '500' && !showRoof && (ROOF_TYPES.has(e.element_type ?? '') || e.wall_type === 'gable'))
+        && !(lod === '500' && !showRoof && (ROOF_TYPES.has(e.element_type ?? '') || e.wall_type === 'gable'
+          || roofSlabs.has(e.element_id)))
         && !(!showFurniture && e.element_type === 'furniture')),
-    [data, lod, hidden, showRoof, showFurniture],
+    [data, lod, hidden, showRoof, showFurniture, roofSlabs],
   );
   useEffect(() => {
     if (!roomView) return;
@@ -1670,9 +1687,9 @@ function BuildingView({ projectId }: { projectId: string }) {
   useEffect(() => { setRoomView(null); }, [lod]);
   const furnitureCount = useMemo(() => (data?.elements ?? []).filter(e => e.element_type === 'furniture').length, [data]);
   const hasRoof = useMemo(
-    () => (data?.elements ?? []).some(e => ROOF_TYPES.has(e.element_type ?? ''))
+    () => (data?.elements ?? []).some(e => ROOF_TYPES.has(e.element_type ?? '')) || roofSlabs.size > 0
       || (data?.slabs ?? []).some(slab => slab.role === 'roof' || slab.role === 'ceiling'),
-    [data],
+    [data, roofSlabs],
   );
   const topFloorHidden = floors.length > 0 && hidden.has(floors[floors.length - 1].placement_id);
   const roofOff = !showRoof || !hasRoof || topFloorHidden;

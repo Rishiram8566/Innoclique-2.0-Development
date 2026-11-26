@@ -429,3 +429,21 @@ def test_cooling_tower_fan_stacks_follow_the_drawn_rings():
                                              "cooling tower", 5500.0, "#cfd6dc", [(7500, -13000, 5600)])
     assert parts[-1]["color"] == cad_import.FAN_STACK_COLOUR
     assert max(v[2] for v in mesh["vertices"]) == 11550.0 + 5500.0 + cad_import.FAN_STACK_MM
+
+
+def test_furniture_blocks_get_their_own_kinds_and_shapes():
+    from app.services import cad_import as ci
+
+    kind = lambda name, layer="A-FURN": ci._equipment_kind(name, layer)[0]   # noqa: E731
+    assert kind("BED_DOUBLE") == "bed" and kind("M_Bed-Standard", "0") == "bed"
+    assert kind("Sofa 3 Seater") == "sofa" and kind("ARMCHAIR") == "armchair" and kind("EWC", "P-SANI") == "wc"
+    assert kind("DINING TABLE 6") == "table" and kind("WASH BASIN") == "washbasin" and kind("WARDROBE 1800") == "wardrobe"
+    assert kind("X123") == "furniture"                       # any other block on a furniture layer
+    assert kind("CHILLER-01", "M-EQPM") == "chiller" and kind("BEDROOM_TAG", "A-ANNO") != "bed"
+    assert ci.EQUIP_NAME.search("BED_DOUBLE") and ci.EQUIP_NAME.search("EWC") and not ci.EQUIP_NAME.search("BEDROOM")
+    mesh, parts = ci._equipment_mesh([(0, 0), (2000, 0), (2000, 1800), (0, 1800)], 0.0, "bed", 560.0, "#ece7dc")
+    assert [p["color"] for p in parts] == ["#7a5234", "#ece7dc", "#6f839c"]          # base, mattress, cover
+    assert max(v[2] for v in mesh["vertices"]) == 560.0
+    mesh, parts = ci._equipment_mesh([(0, 0), (1600, 0), (1600, 900), (0, 900)], 0.0, "table", 750.0, "#8a6a4a")
+    stand = [v for v in mesh["vertices"] if v[2] < 700.0]
+    assert max(v[0] for v in stand) < 1000.0                 # the stand is under the middle of the top

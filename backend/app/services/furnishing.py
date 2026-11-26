@@ -80,6 +80,9 @@ CROSS_AISLE = 1200.0
 HALL_COMPANIONS = {"HALL", "MAIN", "CENTRAL", "LIVING", "FAMILY", "DRAWING", "DINING", "CUM", "AND", "ROOM"}
 ROOM_SIZE_MM = (1000.0, 15000.0)
 MINOR_DRAWN = {"hose reel cabinet", "chair", "desk"}   # drawn in passing; they do not stand for the room's equipment
+# Furniture kinds read from CAD blocks (cad_import.EQUIP_KINDS): drawn in a room, they replace its default layout.
+FURNITURE_DRAWN = {"chair", "armchair", "desk", "table", "sofa", "bed", "wardrobe", "wc", "washbasin", "kitchen sink",
+                   "kitchen counter", "refrigerator", "bathtub", "tv unit", "shelf", "furniture"}
 PLANT_ROOM_MAX_MM = 40000.0     # chiller halls, generator and pump rooms run larger than any habitable room
 FACE_TOLERANCE_MM = 120.0
 DOOR_MARGIN_MM = 150.0
@@ -891,7 +894,7 @@ def facade_style(rooms: list[dict[str, Any]], elements: list[dict[str, Any]]) ->
     for e in elements:
         if e.get("element_type") == "wall" and e.get("is_external") and \
                 MASONRY_WORDS.search(f"{e.get('component') or ''} {e.get('wall_type') or ''} {e.get('material') or ''}"):
-            return {"style": "masonry", "basis": f"the drawing names the outside walls: {e.get('wall_type') or e.get('component')}"}
+            return {"style": "masonry", "basis": f"the files name the outside walls: {e.get('wall_type') or e.get('component')}"}
     kinds = [k for room in rooms for k in room_types(room.get("name", ""))]
     work = sum(k in WORKPLACE_KINDS for k in kinds)
     home = sum(k in HOME_KINDS for k in kinds)
@@ -899,6 +902,17 @@ def facade_style(rooms: list[dict[str, Any]], elements: list[dict[str, Any]]) ->
         return {"style": "glass", "basis": f"display only: an office building ({work} workplace rooms such as offices and "
                                             "meeting rooms); the drawings do not state the facade material"}
     return {"style": "masonry", "basis": "display only: brick, as the drawings do not state the facade material"}
+
+
+def _space_rect(room_label: dict[str, Any]):
+    """An IFC space states the room's extent (its box): used instead of searching for walls round the label."""
+    if "IfcSpace" not in str(room_label.get("source") or ""):
+        return None
+    size, position = room_label.get("size_mm"), room_label.get("position_mm")
+    if not size or not position:
+        return None
+    cx, cy, (w, h) = position[0], position[1], size
+    return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
 
 
 def furnish_building(storeys: list[dict[str, Any]], elements: list[dict[str, Any]],
@@ -938,6 +952,9 @@ def furnish_building(storeys: list[dict[str, Any]], elements: list[dict[str, Any
         if not ok(rect) and drawn_lines is not None:
             rect = room_bounds(cx, cy, walls + drawn_lines(storey["placement_id"]))
             basis = "the plan's drawn wall lines"
+        space = _space_rect(room_label)
+        if space is not None:
+            rect, basis = space, "the IFC space"
         found = ok(rect)
         if found:
             room_label["bounds_basis"] = basis
@@ -948,15 +965,23 @@ def furnish_building(storeys: list[dict[str, Any]], elements: list[dict[str, Any
         if not found:
             notes.append(f"{room_label['name']}: walls round the label not found; not furnished.")
             continue
-        drawn = [e for e in mine if e.get("detected_by") == "cad_block" and not _on_roof(e)
+        # Furniture and equipment the file itself has (CAD blocks, IFC objects) stand for the room's own layout:
+        # where it has them, no default layout is added. In a plant room only real equipment counts (a chair or a
+        # hose reel drawn there does not equip it); in other rooms only furniture does.
+        drawn = [e for e in mine if e.get("detected_by") in ("cad_block", "ifc")
+                 and e.get("element_type") in ("furniture", "fixture") and not _on_roof(e)
                  and rect[0] <= sum(_rect_of(e)[0::2]) / 2 <= rect[2] and rect[1] <= sum(_rect_of(e)[1::2]) / 2 <= rect[3]]
         for e in drawn:
-            e["furniture"]["room"] = room_label["name"]
-            e["provenance"]["room"] = room_label["name"]
-        main = [e for e in drawn if e["component"] not in MINOR_DRAWN]
-        if main:
-            notes.append(f"{room_label['name']}: {len(main)} item(s) of equipment drawn in the CAD file; "
-                         "no indicative layout added.")
+            e.setdefault("furniture", {})["room"] = room_label["name"]
+            e.setdefault("provenance", {})["room"] = room_label["name"]
+        plant_room = any(k in PLANT for k in kinds)
+        own = [e for e in drawn if e.get("detected_by") == "ifc"
+               or (e["component"] != "hose reel cabinet" and (e["component"] in FURNITURE_DRAWN) != plant_room)]
+        if own:
+            what = "equipment" if plant_room else "furniture"
+            source = "IFC model" if any(e.get("detected_by") == "ifc" for e in own) else "CAD file"
+            notes.append(f"{room_label['name']}: {len(own)} item(s) of {what} from the {source}; "
+                         "no default layout added.")
             continue
         if _same_room_below(room_label, kinds, rect, rooms, by_storey):
             room_label["double_height"] = True
@@ -965,6 +990,10 @@ def furnish_building(storeys: list[dict[str, Any]], elements: list[dict[str, Any
             continue
         blockers = [_rect_of(e) for e in mine if e.get("element_type") in ("column", "stair", "lift shaft", "railing")
                     or (e.get("detected_by") == "cad_block" and not _on_roof(e))]
+        if space is not None:
+            # An IFC space is a box: walls standing inside it (an L-shaped room, a nib) keep furniture out.
+            blockers += [r for e in mine if e.get("element_type") in ("wall", "curtain wall")
+                         for r in ([tuple(x) for x in e["plan_rects"]] if e.get("plan_rects") else [_rect_of(e)])]
         base = float(storey["base_elevation_mm"])
         seed = zlib.crc32(f"{room_label['name']}{cx:.0f}{cy:.0f}".encode())
         for kind, part in _split(rect, kinds):

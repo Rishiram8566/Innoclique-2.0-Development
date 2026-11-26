@@ -3,7 +3,8 @@ Generate a two-storey office building as DXF floor plans (what AutoCAD's Save As
 fit-out, stairs and lifts: a 36 x 21.6 m floor on a 7.2 m column grid with an open-plan office (free-standing
 columns inside), board and meeting rooms, a cafeteria / break-out area, reception, a cabin, a print room, toilets,
 a server room and a team office along a corridor, and a core with a dog-leg staircase (riser lines, UP arrow) and
-a lift shaft. Units: millimetres; layers as in make_2bhk_dxf.py.
+a lift shaft. The ground-floor cabin has its desk and chair drawn as blocks (kept instead of a default
+layout). Units: millimetres; layers as in make_2bhk_dxf.py.
 Output: OFFICE_GROUND_FLOOR_PLAN.dxf and OFFICE_FIRST_FLOOR_PLAN.dxf next to this script.
 """
 from pathlib import Path
@@ -24,7 +25,7 @@ def P(x, y):
     return (x, -y)                        # plan y runs down; CAD y up
 
 
-def plan(out: Path, labels, notes):
+def plan(out: Path, labels, notes, furniture=()):
     doc = ezdxf.new("R2018", setup=True)
     doc.header["$INSUNITS"] = 4
     msp = doc.modelspace()
@@ -140,6 +141,13 @@ def plan(out: Path, labels, notes):
         msp.add_text(label, height=250, dxfattribs={"layer": "A-GRID"}).set_placement(
             P(-2900, y), align=ezdxf.enums.TextEntityAlignment.MIDDLE_CENTER)
 
+    # furniture drawn as blocks on the furniture layer (the room keeps these instead of a default layout)
+    for name, (w, d) in {"DESK_1600x800": (1600, 800), "OFFICE CHAIR": (550, 550)}.items():
+        block = doc.blocks.new(name)
+        block.add_lwpolyline([(0, 0), (w, 0), (w, d), (0, d)], close=True)
+    for name, x, y in furniture:
+        msp.add_blockref(name, P(x, y), dxfattribs={"layer": "A-FURN"})
+
     for x, y, name in labels:
         text(x, y, name)
     for i, row in enumerate(["NOTES:", "ALL DIMENSIONS ARE IN MILLIMETRES.", "ALL LEVELS ARE IN METRES."] + notes):
@@ -155,7 +163,8 @@ plan(HERE / "OFFICE_GROUND_FLOOR_PLAN.dxf",
      [(9500, 7200, "OPEN PLAN OFFICE"), (23500, 3400, "BOARD ROOM"), (30600, 3400, "MEETING ROOM"),
       (27000, 10600, "CAFETERIA"), (4200, 19000, "RECEPTION"), (11300, 19000, "MANAGER CABIN"),
       (14900, 19000, "PRINT ROOM"), (32500, 19000, "OFFICE")] + CORE,
-     ["GROUND FLOOR: SSL +0.150"])
+     ["GROUND FLOOR: SSL +0.150"],
+     furniture=[("DESK_1600x800", 11800, 20600), ("OFFICE CHAIR", 12300, 19700)])   # the manager's own desk
 plan(HERE / "OFFICE_FIRST_FLOOR_PLAN.dxf",
      [(9500, 7200, "OPEN PLAN OFFICE"), (23500, 3400, "MEETING ROOM"), (30600, 3400, "CONFERENCE ROOM"),
       (27000, 10600, "BREAK-OUT AREA"), (4200, 19000, "WORKSTATIONS"), (11300, 19000, "CABIN"),
