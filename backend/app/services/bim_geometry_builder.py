@@ -15,6 +15,13 @@ SUPPORTED_WALL_CANDIDATE_TYPES = {
     "wall_geometry_supported_candidate",
 }
 
+# A parallel pair the recogniser left unclassified may become a wall only when
+# a reviewer has confirmed it (Stage 5.3.5); the caller marks the candidate
+# with reviewer_confirmed_wall=True in that case.
+REVIEWER_CONFIRMABLE_PAIR_TYPES = SUPPORTED_WALL_CANDIDATE_TYPES | {
+    "unclassified_parallel_line_pair_candidate",
+}
+
 SUPPORTED_WALL_GEOMETRIES = {
     "parallel_horizontal_lines",
     "parallel_vertical_lines",
@@ -320,9 +327,15 @@ def build_wall_mesh(
             "Recognition and calibration source PDF hashes do not match."
         )
 
-    if candidate.get("element_type") not in SUPPORTED_WALL_CANDIDATE_TYPES:
+    element_type = candidate.get("element_type")
+    reviewer_confirmed = (
+        element_type in REVIEWER_CONFIRMABLE_PAIR_TYPES
+        and candidate.get("reviewer_confirmed_wall") is True
+    )
+    if element_type not in SUPPORTED_WALL_CANDIDATE_TYPES and not reviewer_confirmed:
         raise ValueError(
-            "Only recognized wall edge-pair candidates are supported."
+            "Only recognized wall edge-pair candidates, or parallel pairs a "
+            "reviewer confirmed as walls, are supported."
         )
 
     geometry_type = candidate.get("geometry_type")

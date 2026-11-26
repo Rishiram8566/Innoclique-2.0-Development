@@ -1,71 +1,103 @@
-﻿import json
+﻿"""
+Stage 5.2.4 - resume a checkpointed page-local coordinate transformation.
+
+Usage (from the backend folder):
+    python -m app.services.transform_stage524_resume --project-id <uuid> --drawing-id <uuid> [--page 1] [--batch-size 5000]
+
+Coordinates stay page-local millimetres; calibration verification is still required.
+"""
+
+import argparse
+import json
 import sys
 from pathlib import Path
+from uuid import UUID
 
 from app.services.scale_calibration import transform_primitive_batch
 
-PROJECT = Path("data/projects/a5482b08-1c59-4bf0-9eb2-7ea41eb26f9c")
-DRAWING_ID = "f165c57e-fcaf-48f2-a2fb-1ec018382638"
-PAGE = 1
-BATCH_SIZE = 5000
+PROJECTS_DIR = Path(__file__).resolve().parents[2] / "data" / "projects"
 
-ARTIFACTS = PROJECT / "artifacts/coordinate_transform_stage5_2_4"
-CHECKPOINT = ARTIFACTS / f"{DRAWING_ID}_page_{PAGE}_checkpoint.json"
 
-checkpoint = json.loads(CHECKPOINT.read_text(encoding="utf-8"))
-start = int(checkpoint["next_start_index"])
-total = int(checkpoint["total_primitives"])
+def _uuid(value: str) -> str:
+    try:
+        return str(UUID(value))
+    except (ValueError, TypeError, AttributeError):
+        raise argparse.ArgumentTypeError(f"not a valid UUID: {value!r}") from None
 
-print("=== STAGE 5.2.4 RESUMABLE TRANSFORMATION ===")
-print("Starting index:", start)
-print("Total primitives:", total)
-print("Remaining:", total - start)
-print("Batch size:", BATCH_SIZE)
-print("Calibration verification required: True")
 
-while start < total:
-    expected_next = min(start + BATCH_SIZE, total)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Resume a Stage 5.2.4 batch transformation")
+    parser.add_argument("--project-id", required=True, type=_uuid)
+    parser.add_argument("--drawing-id", required=True, type=_uuid)
+    parser.add_argument("--page", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=5000)
+    args = parser.parse_args()
 
-    result = transform_primitive_batch(
-        PROJECT,
-        drawing_id=DRAWING_ID,
-        page_number=PAGE,
-        start_index=start,
-        batch_size=BATCH_SIZE,
-    )
+    project = PROJECTS_DIR / args.project_id
+    if not project.is_dir():
+        raise SystemExit(f"Project folder not found: {project}")
 
-    actual_next = int(result["next_start_index"])
-    failures = int(result["failed_count"])
-    transformed = int(result["transformed_count"])
-    selected = int(result["primitives_in_batch"])
+    artifacts = project / "artifacts" / "coordinate_transform_stage5_2_4"
+    checkpoint_path = artifacts / f"{args.drawing_id}_page_{args.page}_checkpoint.json"
 
-    print(
-        f"Batch {start}-{actual_next}: "
-        f"selected={selected}, transformed={transformed}, "
-        f"failed={failures}"
-    )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    start = int(checkpoint["next_start_index"])
+    total = int(checkpoint["total_primitives"])
 
-    if failures:
-        print("STOPPED: Transformation failures detected.")
-        print(json.dumps(result.get("failures", []), indent=2))
-        sys.exit(2)
+    print("=== STAGE 5.2.4 RESUMABLE TRANSFORMATION ===")
+    print("Starting index:", start)
+    print("Total primitives:", total)
+    print("Remaining:", total - start)
+    print("Batch size:", args.batch_size)
+    print("Calibration verification required: True")
 
-    if transformed != selected or actual_next != expected_next:
-        print("STOPPED: Unexpected batch or checkpoint progression.")
-        print(json.dumps(result, indent=2))
-        sys.exit(3)
+    while start < total:
+        expected_next = min(start + args.batch_size, total)
 
-    saved = json.loads(CHECKPOINT.read_text(encoding="utf-8"))
+        result = transform_primitive_batch(
+            project,
+            drawing_id=args.drawing_id,
+            page_number=args.page,
+            start_index=start,
+            batch_size=args.batch_size,
+        )
 
-    if int(saved["next_start_index"]) != actual_next:
-        print("STOPPED: Saved checkpoint does not match batch result.")
-        sys.exit(4)
+        actual_next = int(result["next_start_index"])
+        failures = int(result["failed_count"])
+        transformed = int(result["transformed_count"])
+        selected = int(result["primitives_in_batch"])
 
-    start = actual_next
+        print(
+            f"Batch {start}-{actual_next}: "
+            f"selected={selected}, transformed={transformed}, "
+            f"failed={failures}"
+        )
 
-print("\n=== TRANSFORMATION COMPLETE ===")
-print("Transformed through:", start)
-print("Total primitives:", total)
-print("Remaining:", total - start)
-print("Calibration verification required: True")
-print("Coordinates: page-local millimetres only")
+        if failures:
+            print("STOPPED: Transformation failures detected.")
+            print(json.dumps(result.get("failures", []), indent=2))
+            sys.exit(2)
+
+        if transformed != selected or actual_next != expected_next:
+            print("STOPPED: Unexpected batch or checkpoint progression.")
+            print(json.dumps(result, indent=2))
+            sys.exit(3)
+
+        saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+
+        if int(saved["next_start_index"]) != actual_next:
+            print("STOPPED: Saved checkpoint does not match batch result.")
+            sys.exit(4)
+
+        start = actual_next
+
+    print("\n=== TRANSFORMATION COMPLETE ===")
+    print("Transformed through:", start)
+    print("Total primitives:", total)
+    print("Remaining:", total - start)
+    print("Calibration verification required: True")
+    print("Coordinates: page-local millimetres only")
+
+
+if __name__ == "__main__":
+    main()

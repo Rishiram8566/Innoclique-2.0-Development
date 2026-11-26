@@ -1,0 +1,178 @@
+"""Stage 5.3.5 API: human wall-height verification ledger."""
+
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from app.services import height_verification_ledger as ledger_service
+from app.services.recognition_supplement import read_recognition
+from app.services.sheet_registration import sheet_index, typical_wall_thickness_mm
+from app.services.wall_height_evidence_association import (
+    OUTPUT_ARTIFACT_NAME as HEIGHT_ASSOCIATION_ARTIFACT_NAME,
+)
+
+router = APIRouter(tags=["Stage 5.3.5 height verification"])
+
+PROJECTS_DIR = Path(__file__).resolve().parents[2] / "data" / "projects"
+BASE = "/api/projects/{project_id}/geometry/stage5-3-5"
+
+# One writer at a time per process; the file write itself is atomic.
+_LEDGER_LOCK = threading.Lock()
+
+
+class HeightVerificationRequest(BaseModel):
+    height_source: str = Field(default="annotation", pattern="^(annotation|storey_height)$")
+    height_candidate_id: str | None = Field(default=None, max_length=64)
+    drawing_id: str = Field(min_length=1, max_length=64)
+    page_number: int = Field(ge=1)
+    element_ids: list[str] = Field(min_length=1, max_length=500)
+    decision: str = Field(pattern="^(confirmed|rejected)$")
+    reviewer: str = Field(min_length=2, max_length=120)
+    justification: str = Field(min_length=20, max_length=2000)
+    cited_evidence_ids: list[str] = Field(default_factory=list, max_length=200)
+    cross_drawing_justification: str | None = Field(default=None, max_length=2000)
+
+
+class RevokeRequest(BaseModel):
+    reviewer: str = Field(min_length=2, max_length=120)
+    reason: str = Field(min_length=20, max_length=2000)
+
+
+def _project_folder(project_id: str) -> tuple[str, Path]:
+    try:
+        safe_id = str(UUID(project_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=404, detail="Project not found") from None
+    folder = PROJECTS_DIR / safe_id
+    if not folder.is_dir():
+        raise HTTPException(status_code=404, detail="Project not found")
+    return safe_id, folder
+
+
+def _safe_drawing_id(drawing_id: str) -> str:
+    try:
+        return str(UUID(drawing_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=404, detail="Drawing not found") from None
+
+
+def _load_inputs(folder: Path, project_id: str) -> dict:
+    try:
+        recognition = read_recognition(folder)
+        ledger = ledger_service.load_ledger(folder, project_id)
+        return {
+            "recognition": recognition,
+            "ledger": ledger,
+            "height": ledger_service.read_optional_artifact(folder, HEIGHT_ASSOCIATION_ARTIFACT_NAME),
+            "validation": ledger_service.read_optional_artifact(
+                folder, ledger_service.GEOMETRY_VALIDATION_ARTIFACT_NAME
+            ),
+            "calibration": ledger_service.read_optional_artifact(
+                folder, ledger_service.CALIBRATION_ARTIFACT_NAME
+            ),
+        }
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(BASE + "/wall-candidates")
+def get_page_wall_candidates(
+    project_id: str,
+    drawing_id: str = Query(..., min_length=1, max_length=64),
+    page_number: int = Query(1, ge=1),
+):
+    """Wall candidates on one page, with height candidates and verification status."""
+    safe_id, folder = _project_folder(project_id)
+    inputs = _load_inputs(folder, safe_id)
+    if inputs["recognition"].get("project_id") != safe_id:
+        raise HTTPException(status_code=422, detail="Recognition report project ownership mismatch")
+    try:
+        return ledger_service.list_page_wall_candidates(
+            recognition_report=inputs["recognition"],
+            drawing_id=_safe_drawing_id(drawing_id),
+            page_number=page_number,
+            ledger=inputs["ledger"],
+            height_report=inputs["height"],
+            validation_report=inputs["validation"],
+            calibration_report=inputs["calibration"],
+            typical_wall_thickness_mm=typical_wall_thickness_mm(sheet_index(folder), _safe_drawing_id(drawing_id)),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(BASE + "/height-verifications")
+def get_height_verifications(project_id: str):
+    safe_id, folder = _project_folder(project_id)
+    try:
+        return ledger_service.load_ledger(folder, safe_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(BASE + "/height-verifications", status_code=201)
+def create_height_verification(project_id: str, payload: HeightVerificationRequest):
+    """Record one reviewer decision. Nothing is generated by this call."""
+    safe_id, folder = _project_folder(project_id)
+    request = payload.model_dump()
+    request["drawing_id"] = _safe_drawing_id(request["drawing_id"])
+
+    with _LEDGER_LOCK:
+        inputs = _load_inputs(folder, safe_id)
+        if inputs["height"] is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Stage 5.3.4 height association report has not been generated.",
+            )
+        try:
+            record = ledger_service.build_verification_record(
+                ledger=inputs["ledger"],
+                recognition_report=inputs["recognition"],
+                height_report=inputs["height"],
+                height_report_sha256=ledger_service.height_report_sha256(folder),
+                request=request,
+                validation_report=inputs["validation"],
+            )
+        except ledger_service.VerificationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        ledger = ledger_service.apply_verification(inputs["ledger"], record)
+        try:
+            ledger_service.save_ledger(folder, ledger)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save ledger: {exc}") from exc
+
+    return {"message": "Height verification recorded.", "verification": record}
+
+
+@router.post(BASE + "/height-verifications/{verification_id}/revoke")
+def revoke_height_verification(project_id: str, verification_id: str, payload: RevokeRequest):
+    safe_id, folder = _project_folder(project_id)
+    with _LEDGER_LOCK:
+        try:
+            ledger = ledger_service.load_ledger(folder, safe_id)
+            record = ledger_service.revoke_verification(
+                ledger, verification_id, reviewer=payload.reviewer, reason=payload.reason,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ledger_service.VerificationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            ledger_service.save_ledger(folder, ledger)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save ledger: {exc}") from exc
+    return {"message": "Height verification revoked.", "verification": record}

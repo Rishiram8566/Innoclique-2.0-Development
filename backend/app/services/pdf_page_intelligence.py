@@ -6,9 +6,23 @@ reported as image_only_or_ocr_unavailable rather than silently treated as read.
 """
 from __future__ import annotations
 
-import pytesseract
+import os
+import shutil
+from typing import Any
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+_DEFAULT_WINDOWS_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+
+def _configure_tesseract(module) -> None:
+    """Point pytesseract at a Tesseract binary: TESSERACT_CMD, then PATH, then the default Windows install."""
+    for candidate in (
+        os.environ.get("TESSERACT_CMD"),
+        shutil.which("tesseract"),
+        _DEFAULT_WINDOWS_TESSERACT,
+    ):
+        if candidate and os.path.isfile(candidate):
+            module.pytesseract.tesseract_cmd = candidate
+            return
 
 
 def extract_pdf_pages(pdf_path, *, enable_ocr: bool = True,
@@ -29,6 +43,7 @@ def extract_pdf_pages(pdf_path, *, enable_ocr: bool = True,
         try:
             import pytesseract as _pytesseract
             from PIL import Image as _Image
+            _configure_tesseract(_pytesseract)
             pytesseract, Image = _pytesseract, _Image
             ocr_available = True
         except Exception as exc:

@@ -98,6 +98,7 @@ def _iter_drawing_metadata(path: Path) -> Iterator[dict]:
             elif prefix == "drawings.item.source_sha256":
                 if event == "string":
                     current["source_sha256"] = value
+                    current["legacy_record"] = False
 
             elif prefix == "drawings.item.source.sha256":
                 if (
@@ -105,6 +106,8 @@ def _iter_drawing_metadata(path: Path) -> Iterator[dict]:
                     and not current.get("source_sha256")
                 ):
                     current["source_sha256"] = value
+                    # Only an older extractor wrote the hash here (and capped each page at 50,000 primitives).
+                    current["legacy_record"] = True
 
             elif (
                 prefix == "drawings.item.summary"
@@ -121,6 +124,123 @@ def _iter_drawing_metadata(path: Path) -> Iterator[dict]:
                 current = None
 
 
+LEGACY_PRIMITIVE_CAP = 50000        # the older extractor stopped each page here
+
+
+def is_legacy_record(item: dict) -> bool:
+    """A geometry record written by an older extractor, to be extracted again (it may be truncated)."""
+    summary = item.get("summary") or {}
+    return bool(item.get("legacy_record")) or int(summary.get("vector_primitive_count") or 0) == LEGACY_PRIMITIVE_CAP
+
+
+MAX_EXTRACTION_WORKERS = 6         # PDFs extracted at the same time (each in its own process)
+STALE_TEMP_SECONDS = 2 * 3600      # a per-PDF temp file this old was left by an interrupted run
+
+
+def _remove_stale_temp_files(artifacts_dir: Path) -> int:
+    """Delete per-PDF extraction files left behind by an interrupted run (they can add up to gigabytes)."""
+    import time
+
+    removed = 0
+    cutoff = time.time() - STALE_TEMP_SECONDS
+    for path in artifacts_dir.glob(".stage5_stream_*"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:                           # in use or already gone: leave it
+            continue
+    return removed
+
+
+class _WorkerFailure(Exception):
+    """An extraction that failed in a worker; its message is already "ErrorType: detail"."""
+
+
+def _extract_one(job: tuple[str, str, str | None, str | None]) -> dict:
+    """Extract one PDF to its own JSON file; returns only what the caller checks (picklable for a worker)."""
+    source, sidecar, drawing_id, filename = job
+    try:
+        extraction = stream_pdf_geometry_to_json(Path(source), Path(sidecar), drawing_id=drawing_id, filename=filename)
+        return {"ok": True, "source_sha256": extraction.get("source_sha256")}
+    except Exception as exc:                      # reported per drawing, like a sequential failure
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _extract_all(jobs: list[tuple[str, str, str | None, str | None]]) -> list[dict]:
+    """Extract PDFs in parallel worker processes (in order); one by one if a pool cannot be started."""
+    import os
+
+    workers = min(len(jobs), MAX_EXTRACTION_WORKERS, max(1, (os.cpu_count() or 2) - 2))
+    if workers > 1:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                return list(pool.map(_extract_one, jobs))
+        except Exception:                         # no process pool here: fall back to one at a time
+            pass
+    return [_extract_one(job) for job in jobs]
+
+
+METADATA_INDEX_NAME = "drawing_geometry_stage5_metadata_index.json"    # written by scale_calibration
+FAILURES_INDEX_NAME = "drawing_geometry_stage5_failures.json"
+
+
+def _current_companion(target: Path, name: str) -> dict | None:
+    """A small file kept next to the geometry artifact, if it was made from the artifact as it is now."""
+    try:
+        stat = target.stat()
+        cached = json.loads((target.parent / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (isinstance(cached, dict) and cached.get("source_size_bytes") == stat.st_size
+            and cached.get("source_mtime_ns") == stat.st_mtime_ns):
+        return cached
+    return None
+
+
+def _drawing_metadata(target: Path) -> Iterator[dict]:
+    """
+    Each drawing's id, hash and summary. The artifact can be gigabytes (minutes to read through), so the small
+    metadata index is used while it matches the artifact.
+    """
+    index = _current_companion(target, METADATA_INDEX_NAME)
+    if index is None or not isinstance(index.get("drawings"), list):
+        yield from _iter_drawing_metadata(target)
+        return
+    for item in index["drawings"]:
+        source = item.get("source")
+        nested = source.get("sha256") if isinstance(source, dict) else None
+        yield {
+            "drawing_id": item.get("drawing_id"),
+            "source_sha256": item.get("source_sha256") or nested,
+            # Only an older extractor wrote the hash inside "source" alone.
+            "legacy_record": not item.get("source_sha256") and bool(nested),
+            "summary": item.get("summary") or {},
+        }
+
+
+def _save_failures(target: Path, failed: list[dict]) -> None:
+    """The artifact's failure list in a small file, so the next run need not read the whole artifact for it."""
+    try:
+        stat = target.stat()
+        (target.parent / FAILURES_INDEX_NAME).write_text(json.dumps(
+            {"source_size_bytes": stat.st_size, "source_mtime_ns": stat.st_mtime_ns, "failed": failed},
+            default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _previous_failures(target: Path) -> list[dict]:
+    saved = _current_companion(target, FAILURES_INDEX_NAME)
+    if saved is not None and isinstance(saved.get("failed"), list):
+        return saved["failed"]
+    failed = list(_iter_array_items(target, "failed.item"))
+    _save_failures(target, failed)
+    return failed
+
+
 def _previous_indexes(
     target: Path,
 ) -> tuple[dict[str, str], dict[str, dict]]:
@@ -131,15 +251,16 @@ def _previous_indexes(
     if not target.is_file():
         return drawing_hashes, failures
 
-    for item in _iter_drawing_metadata(target):
+    for item in _drawing_metadata(target):
         drawing_id = str(item.get("drawing_id") or "")
 
         if drawing_id:
-            drawing_hashes[drawing_id] = str(
+            # A record from the older extractor is re-extracted: its geometry may be truncated.
+            drawing_hashes[drawing_id] = "" if is_legacy_record(item) else str(
                 item.get("source_sha256") or ""
             )
 
-    for item in _iter_array_items(target, "failed.item"):
+    for item in _previous_failures(target):
         drawing_id = str(
             item.get("drawing_id") or item.get("filename") or ""
         )
@@ -201,13 +322,14 @@ def _report_summary(
     processed_ids: set[str] = set()
 
     # Keep previous successful geometry unless it was successfully replaced.
-    for item in _iter_drawing_metadata(previous_path):
+    for item in (_drawing_metadata(previous_path) if previous_path.is_file() else ()):
         drawing_id = str(item.get("drawing_id") or "")
 
         if not drawing_id or drawing_id in replaced_ids:
             continue
 
-        processed_ids.add(drawing_id)
+        if not is_legacy_record(item):
+            processed_ids.add(drawing_id)
         summary = item.get("summary") or {}
         extracted_count += 1
 
@@ -264,8 +386,8 @@ def extract_project_geometry(
     written atomically while drawing records are yielded one at a time.
     """
 
-    if not isinstance(batch_size, int) or not 1 <= batch_size <= 5:
-        raise ValueError("batch_size must be an integer between 1 and 5")
+    if not isinstance(batch_size, int) or not 1 <= batch_size <= 25:
+        raise ValueError("batch_size must be an integer between 1 and 25")
 
     root = Path(project_dir)
     drawings_dir = root / "drawings"
@@ -274,7 +396,9 @@ def extract_project_geometry(
 
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
+    _remove_stale_temp_files(artifacts_dir)
     drawing_hashes, cached_failures = _previous_indexes(target)
+    previous_failures = dict(cached_failures)
 
     records = project.get("drawings", [])
 
@@ -359,6 +483,7 @@ def extract_project_geometry(
     new_failures: dict[str, dict] = {}
 
     try:
+        jobs = []
         for record, source, source_hash in pending[:batch_size]:
             drawing_id = str(
                 record.get("id")
@@ -372,16 +497,20 @@ def extract_project_geometry(
             sidecar = artifacts_dir / (
                 f".stage5_stream_{uuid.uuid4().hex}.json"
             )
+            jobs.append((record, source, source_hash, drawing_id, sidecar))
 
+        # Each PDF is extracted to its own file, so a batch runs on several CPU cores at once.
+        outcomes = _extract_all(
+            [(str(source), str(sidecar), drawing_id or None, record.get("filename"))
+             for record, source, source_hash, drawing_id, sidecar in jobs]
+        )
+
+        for (record, source, source_hash, drawing_id, sidecar), outcome in zip(jobs, outcomes):
             try:
-                extraction = stream_pdf_geometry_to_json(
-                    source,
-                    sidecar,
-                    drawing_id=drawing_id or None,
-                    filename=record.get("filename"),
-                )
+                if not outcome.get("ok"):
+                    raise _WorkerFailure(outcome.get("reason") or "extraction failed")
 
-                if extraction.get("source_sha256") != source_hash:
+                if outcome.get("source_sha256") != source_hash:
                     raise RuntimeError(
                         "PDF source changed during extraction; "
                         "the generated result was rejected."
@@ -399,7 +528,7 @@ def extract_project_geometry(
                     "drawing_id": drawing_id,
                     "filename": record.get("filename"),
                     "source_sha256": source_hash,
-                    "reason": f"{type(exc).__name__}: {exc}",
+                    "reason": str(exc) if isinstance(exc, _WorkerFailure) else f"{type(exc).__name__}: {exc}",
                 }
 
             newly_processed += 1
@@ -499,7 +628,11 @@ def extract_project_geometry(
             ],
         }
 
-        write_json_atomic(target, report)
+        # Nothing extracted in this call and no failure changed: the artifact on disk already holds these
+        # drawings, and rewriting it would copy every drawing's geometry (gigabytes, many minutes) for nothing.
+        if jobs or not target.is_file() or failed_by_id != previous_failures:
+            write_json_atomic(target, report)
+            _save_failures(target, failed)
 
         return {
             "schema_version": report["schema_version"],

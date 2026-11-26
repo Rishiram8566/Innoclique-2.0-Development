@@ -1,10 +1,10 @@
 ﻿import { Suspense, useEffect, useMemo, useState } from 'react';
-import { Canvas, useLoader } from '@react-three/fiber';
-import { Bounds, OrbitControls } from '@react-three/drei';
+import { Canvas, useLoader, useThree } from '@react-three/fiber';
+import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 
 const API = 'http://127.0.0.1:8000/api';
-const PDF_PREVIEW_SCALE = 1.5;
+export const PDF_PREVIEW_SCALE = 1.5;
 
 type SceneElement = {
   element_id: string;
@@ -152,14 +152,60 @@ function Footprint({ element }: { element: DisplayElement }) {
   );
 }
 
-function PdfPage({ url }: { url: string }) {
+/**
+ * Frame an orthographic camera straight down onto the page.
+ * (drei's Bounds keeps the camera's starting direction relative to the
+ * content centre, which tilted the plan into a parallelogram.)
+ */
+function useFitOrthographicToPage(width: number, height: number, fitSignal = 0) {
+  const camera = useThree(state => state.camera);
+  const size = useThree(state => state.size);
+  const controls = useThree(state => state.controls) as
+    | { target?: THREE.Vector3; update?: () => void }
+    | null;
+
+  useEffect(() => {
+    if (!(camera instanceof THREE.OrthographicCamera) || !width || !height) return;
+    const cx = width / 2;
+    const cy = -height / 2;
+    camera.position.set(cx, cy, 1500);
+    camera.up.set(0, 1, 0);
+    camera.zoom = Math.min(size.width / width, size.height / height) * 0.96;
+    camera.lookAt(cx, cy, 0);
+    camera.updateProjectionMatrix();
+    if (controls?.target) {
+      controls.target.set(cx, cy, 0);
+      controls.update?.();
+    }
+  }, [camera, controls, size.width, size.height, width, height, fitSignal]);
+}
+
+export function PdfPage({
+  url,
+  onPagePoint,
+  fitSignal = 0,
+}: {
+  url: string;
+  /** Called with PDF page coordinates (x right, y down) when the page is clicked. */
+  onPagePoint?: (x: number, y: number) => void;
+  /** Change this number to re-frame the whole page (e.g. a "Fit page" button). */
+  fitSignal?: number;
+}) {
   const texture = useLoader(THREE.TextureLoader, url);
   const image = texture.image as HTMLImageElement;
   const pageWidth = image.width / PDF_PREVIEW_SCALE;
   const pageHeight = image.height / PDF_PREVIEW_SCALE;
+  useFitOrthographicToPage(pageWidth, pageHeight, fitSignal);
 
   return (
-    <mesh position={[pageWidth / 2, -pageHeight / 2, -1]} renderOrder={-1}>
+    <mesh
+      position={[pageWidth / 2, -pageHeight / 2, -1]}
+      renderOrder={-1}
+      onClick={onPagePoint ? event => {
+        event.stopPropagation();
+        onPagePoint(event.point.x, -event.point.y);
+      } : undefined}
+    >
       <planeGeometry args={[pageWidth, pageHeight]} />
       <meshBasicMaterial map={texture} toneMapped={false} />
     </mesh>
@@ -175,14 +221,12 @@ function ViewerContents({
 }) {
   return (
     <Suspense fallback={null}>
-      <Bounds fit clip observe margin={1.04}>
-        <group>
-          <PdfPage url={previewUrl} />
-          {elements.map(element => (
-            <Footprint key={element.id} element={element} />
-          ))}
-        </group>
-      </Bounds>
+      <group>
+        <PdfPage url={previewUrl} />
+        {elements.map(element => (
+          <Footprint key={element.id} element={element} />
+        ))}
+      </group>
     </Suspense>
   );
 }

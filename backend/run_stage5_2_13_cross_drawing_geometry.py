@@ -8,32 +8,14 @@ import os
 import tempfile
 from pathlib import Path
 
+from stage_script_args import uuid_arg
 from app.services.cross_drawing_geometry import (
     analyze_cross_drawing_geometry,
 )
 
 
-PROJECT_ID = "5e9627a7-1b4b-41ea-8ac9-c2e2c5baf845"
-
 BASE_DIR = Path(__file__).resolve().parent
 
-DEFAULT_INPUT = (
-    BASE_DIR
-    / "data"
-    / "projects"
-    / PROJECT_ID
-    / "artifacts"
-    / "engineering_element_candidates_stage5_1_6.json"
-)
-
-DEFAULT_OUTPUT = (
-    BASE_DIR
-    / "data"
-    / "projects"
-    / PROJECT_ID
-    / "artifacts"
-    / "cross_drawing_geometry_stage5_2_13.json"
-)
 
 
 def sha256_file(path: Path) -> str:
@@ -77,13 +59,15 @@ def main() -> None:
 
     parser.add_argument(
         "--project-id",
-        default=PROJECT_ID,
+        required=True,
+        type=uuid_arg,
     )
 
     parser.add_argument(
         "--input",
         type=Path,
-        default=DEFAULT_INPUT,
+        default=None,
+        help="Recognition artifact (default: the project's Stage 5.1.6 report).",
     )
 
     parser.add_argument(
@@ -96,7 +80,15 @@ def main() -> None:
 
     project_id = args.project_id
 
-    input_path = args.input.resolve()
+    input_path = (
+        args.input
+        or BASE_DIR
+        / "data"
+        / "projects"
+        / project_id
+        / "artifacts"
+        / "engineering_element_candidates_stage5_1_6.json"
+    ).resolve()
 
     output_path = (
         args.output.resolve()
